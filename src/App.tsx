@@ -83,14 +83,6 @@ function getStoragePath(path: string) {
   return path
     .split(/[\\/]/)
     .filter((segment) => segment && segment !== '.' && segment !== '..')
-    .map((segment) => {
-      if (/^[A-Za-z0-9._-]+$/.test(segment) && !segment.startsWith('x_')) {
-        return segment
-      }
-
-      const hex = Array.from(new TextEncoder().encode(segment), (byte) => byte.toString(16).padStart(2, '0')).join('')
-      return `x_${hex}`
-    })
     .join('/')
 }
 
@@ -107,7 +99,8 @@ function decodeStoragePath(path: string) {
       for (let index = 0; index < bytes.length; index += 1) {
         bytes[index] = Number.parseInt(encoded.slice(index * 2, index * 2 + 2), 16)
       }
-      return new TextDecoder().decode(bytes)
+      const decoded = new TextDecoder().decode(bytes)
+      return /^[A-Za-z0-9._-]+$/.test(decoded) ? segment : decoded
     })
     .join('/')
 }
@@ -226,6 +219,7 @@ async function uploadLargeFile(
   originalPath: string,
   userId: string,
   accessToken: string,
+  upsert: boolean,
   onProgress: (sent: number, total: number) => void,
 ) {
   if (!supabaseUrl || !supabaseAnonKey) {
@@ -240,7 +234,7 @@ async function uploadLargeFile(
     headers: {
       apikey: supabaseAnonKey,
       authorization: `Bearer ${accessToken}`,
-      'x-upsert': 'true',
+      'x-upsert': String(upsert),
     },
     uploadDataDuringCreation: true,
     removeFingerprintOnSuccess: true,
@@ -878,6 +872,7 @@ function App() {
           file.path,
           session.user.id,
           session.access_token,
+          true,
           () => undefined,
         )
       } else {
@@ -986,6 +981,142 @@ function App() {
           completed = new Set(parsedProgress.completed)
         }
       }
+
+      currentPath = 'verificação de nomes'
+      setUploadMessage('Verificando se as pastas ou arquivos já existem no Supabase...')
+      const storage = supabase.storage.from(storageBucket)
+      const pageSize = 1000
+      const readStoragePage = async (storageFolder: string, offset: number) => {
+        let entries: Awaited<ReturnType<typeof storage.list>>['data'] = null
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          const { data, error } = await storage.list(storageFolder, {
+            limit: pageSize,
+            offset,
+            sortBy: { column: 'name', order: 'asc' },
+          })
+
+          if (!error) {
+            entries = data
+            break
+          }
+          if (!isRetryableStorageError(error) || attempt === 3) {
+            throw error
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 750 * (attempt + 1)))
+        }
+
+        if (entries === null) {
+          throw new Error(`Não foi possível verificar a pasta "${storageFolder}" antes do envio.`)
+        }
+        return entries
+      }
+
+      const existingRootEntries = new Map<string, Array<{ name: string; isFolder: boolean }>>()
+      let rootOffset = 0
+      while (true) {
+        const entries = await readStoragePage(userId, rootOffset)
+        for (const entry of entries) {
+          const name = decodeStoragePath(entry.name)
+          const rootEntries = existingRootEntries.get(name) ?? []
+          rootEntries.push({
+            name: entry.name,
+            isFolder: entry.id === null && entry.metadata === null,
+          })
+          existingRootEntries.set(name, rootEntries)
+        }
+        if (entries.length < pageSize) {
+          break
+        }
+        rootOffset += entries.length
+      }
+
+      const pathsInBatch = new Set<string>()
+      const repeatedPaths = new Set<string>()
+      const filesByRoot = new Map<string, Array<{ path: string; identity: string }>>()
+      for (const file of selectedFiles) {
+        const path = getStoragePath(getFilePath(file))
+        const identity = getUploadIdentity(file)
+        if (pathsInBatch.has(path)) {
+          repeatedPaths.add(path)
+        }
+        pathsInBatch.add(path)
+        const rootName = path.split('/')[0]
+        const rootFiles = filesByRoot.get(rootName) ?? []
+        rootFiles.push({ path, identity })
+        filesByRoot.set(rootName, rootFiles)
+      }
+
+      const conflicts = new Set<string>()
+      const readExistingPaths = async (
+        storageFolder: string,
+        relativeFolder: string,
+        paths: Set<string>,
+      ): Promise<void> => {
+        let offset = 0
+        while (true) {
+          const entries = await readStoragePage(storageFolder, offset)
+          for (const entry of entries) {
+            const relativePath = relativeFolder ? `${relativeFolder}/${entry.name}` : entry.name
+            if (entry.id === null && entry.metadata === null) {
+              await readExistingPaths(`${storageFolder}/${entry.name}`, relativePath, paths)
+            } else {
+              paths.add(decodeStoragePath(relativePath))
+            }
+          }
+          if (entries.length < pageSize) {
+            break
+          }
+          offset += entries.length
+        }
+      }
+
+      for (const [rootName, rootFiles] of filesByRoot) {
+        const existingEntries = existingRootEntries.get(rootName)
+        if (!existingEntries) {
+          continue
+        }
+
+        const rootCompletedPaths = new Set(rootFiles
+          .filter(({ identity }) => completed.has(identity))
+          .map(({ path }) => path))
+        const includesFolder = rootFiles.some(({ path }) => path.includes('/'))
+        const includesRootFile = rootFiles.some(({ path }) => !path.includes('/'))
+        const mixedBatchKinds = includesFolder && includesRootFile
+        const existing = existingEntries.length === 1 ? existingEntries[0] : null
+        let canResumeThisFolder = false
+
+        if (existing?.isFolder && includesFolder && !includesRootFile && rootCompletedPaths.size > 0) {
+          const existingPaths = new Set<string>()
+          await readExistingPaths(`${userId}/${existing.name}`, existing.name, existingPaths)
+          canResumeThisFolder = existingPaths.size > 0 &&
+            [...existingPaths].every((path) => rootCompletedPaths.has(path)) &&
+            [...rootCompletedPaths].every((path) => existingPaths.has(path))
+        } else if (existing && !existing.isFolder && !includesFolder && !mixedBatchKinds) {
+          canResumeThisFolder = rootFiles.every(({ path, identity }) =>
+            path === rootName && completed.has(identity),
+          )
+        }
+
+        if (existingEntries.length > 1 || mixedBatchKinds || !canResumeThisFolder) {
+          conflicts.add(rootName)
+        }
+      }
+
+      if (conflicts.size > 0 || repeatedPaths.size > 0) {
+        const names = [...conflicts].slice(0, 5).join('", "')
+        const moreNames = conflicts.size > 5 ? ` e mais ${conflicts.size - 5}` : ''
+        const messages: string[] = []
+        if (conflicts.size > 0) {
+          messages.push(`Já existe uma pasta ou arquivo com o nome "${names}"${moreNames} no Supabase.`)
+        }
+        if (repeatedPaths.size > 0) {
+          messages.push(`O lote selecionado contém ${repeatedPaths.size} caminho(s) duplicado(s).`)
+        }
+        setUploadMessage(`${messages.join(' ')} Nenhum arquivo foi enviado. Altere o nome da pasta ou do arquivo e selecione novamente.`)
+        setUploadMessageTone('error')
+        return
+      }
+
       uploadedCount = Math.min(completed.size, selectedFiles.length)
       completedBytes = selectedFiles
         .filter((file) => completed.has(getUploadIdentity(file)))
@@ -1005,8 +1136,8 @@ function App() {
         setUploadMessage(`Enviando ${uploadedCount + 1} de ${selectedFiles.length}: ${currentPath}`)
         setUploadMessageTone('info')
 
-        const safePath = getStoragePath(currentPath)
-        const storagePath = `${userId}/${safePath}`
+        const relativePath = getStoragePath(currentPath)
+        const storagePath = `${userId}/${relativePath}`
         if (file.size > 6 * 1024 * 1024) {
           await uploadLargeFile(
             file,
@@ -1014,12 +1145,13 @@ function App() {
             currentPath,
             userId,
             sessionData.session.access_token,
+            false,
             (sent) => setUploadByteProgress({ sent: completedBytes + sent, total: totalBytes }),
           )
         } else {
           const { error } = await supabase.storage.from(storageBucket).upload(storagePath, file, {
             cacheControl: '3600',
-            upsert: true,
+            upsert: false,
             contentType: file.type || undefined,
             metadata: { originalPath: currentPath },
           })
@@ -1045,7 +1177,9 @@ function App() {
     } catch (error) {
       const message = getUploadErrorMessage(error)
       const normalizedMessage = message.toLowerCase()
-      const details = normalizedMessage.includes('exceeded the maximum allowed size') || normalizedMessage.includes('maximum allowed size')
+      const details = normalizedMessage.includes('already exists') || normalizedMessage.includes('duplicate')
+        ? `Já existe um objeto com esse nome no Supabase. Nenhum arquivo existente foi substituído. Altere o nome da pasta ou do arquivo e tente novamente.`
+        : normalizedMessage.includes('exceeded the maximum allowed size') || normalizedMessage.includes('maximum allowed size')
         ? `O arquivo ultrapassa o limite máximo permitido pelo Supabase para o bucket "${storageBucket}". O envio resumível foi usado, mas ele não remove o limite de tamanho. Aumente o limite em Storage > Buckets > ${storageBucket} (e confira o limite global em Storage > Settings) para um valor acima do tamanho desse arquivo; o máximo também depende do plano Supabase. Depois tente enviar novamente.`
         : normalizedMessage.includes('bucket not found')
         ? `O bucket "${storageBucket}" não existe neste projeto Supabase. Crie esse bucket em Storage > Buckets ou ajuste VITE_SUPABASE_BUCKET no arquivo .env para o nome de um bucket existente; depois reinicie o servidor.`
