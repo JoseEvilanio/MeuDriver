@@ -1359,6 +1359,25 @@ tbody td:first-child {
   word-break: break-word;
 }
 
+.upload-feedback {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--card);
+}
+
+.upload-feedback.success {
+  border-color: #bbf7d0;
+  background: var(--success-muted);
+  color: var(--success);
+}
+
+.upload-feedback.error {
+  border-color: var(--destructive-border);
+  background: #fef2f2;
+  color: var(--destructive);
+}
+
 .upload-meta {
   display: flex;
   justify-content: space-between;

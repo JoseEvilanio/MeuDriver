@@ -305,6 +305,7 @@ function App() {
   const previewGeneration = useRef(0)
   const [uploading, setUploading] = useState(false)
   const [uploadMessage, setUploadMessage] = useState('')
+  const [uploadMessageTone, setUploadMessageTone] = useState<'info' | 'success' | 'error'>('info')
   const [uploadProgress, setUploadProgress] = useState({ completed: 0, total: 0 })
   const [uploadByteProgress, setUploadByteProgress] = useState({ sent: 0, total: 0 })
   const [uploadComplete, setUploadComplete] = useState(false)
@@ -914,16 +915,19 @@ function App() {
   const handleUpload = async () => {
     if (!supabase || selectedFiles.length === 0) {
       setUploadMessage('Selecione um ou mais arquivos, ou uma pasta, antes de enviar.')
+      setUploadMessageTone('error')
       return
     }
     if (uploadInProgressRef.current) {
       setUploadMessage('Aguarde a transferência atual terminar antes de iniciar outro envio.')
+      setUploadMessageTone('error')
       return
     }
 
     setUploading(true)
     uploadInProgressRef.current = true
     setUploadMessage('')
+    setUploadMessageTone('info')
     setUploadComplete(false)
     setUploadProgress({ completed: 0, total: selectedFiles.length })
     const totalBytes = selectedFiles.reduce((sum, file) => sum + file.size, 0)
@@ -942,6 +946,7 @@ function App() {
 
       if (!sessionData.session) {
         setUploadMessage('Faça login no app antes de enviar arquivos. A política do Storage permite uploads somente para usuários autenticados.')
+        setUploadMessageTone('error')
         return
       }
 
@@ -973,10 +978,12 @@ function App() {
         const identity = getUploadIdentity(file)
         if (completed.has(identity)) {
           setUploadMessage(`Retomando envio: ${uploadedCount} de ${selectedFiles.length} arquivo(s) já concluídos.`)
+          setUploadMessageTone('info')
           continue
         }
 
         setUploadMessage(`Enviando ${uploadedCount + 1} de ${selectedFiles.length}: ${currentPath}`)
+        setUploadMessageTone('info')
 
         const safePath = getStoragePath(currentPath)
         const storagePath = `${userId}/${safePath}`
@@ -1014,6 +1021,7 @@ function App() {
       setUploadComplete(true)
       setUploadByteProgress({ sent: totalBytes, total: totalBytes })
       setUploadMessage(`${uploadedCount} arquivo(s) enviado(s) para o bucket "${storageBucket}", mantendo a estrutura de pastas.`)
+      setUploadMessageTone('success')
     } catch (error) {
       const message = getUploadErrorMessage(error)
       const normalizedMessage = message.toLowerCase()
@@ -1026,6 +1034,7 @@ function App() {
         : message
 
       setUploadMessage(`Upload interrompido após ${uploadedCount} de ${selectedFiles.length} arquivo(s). Falha em "${currentPath}": ${details}`)
+      setUploadMessageTone('error')
     } finally {
       uploadInProgressRef.current = false
       setUploading(false)
@@ -1081,6 +1090,7 @@ function App() {
       })
 
     setUploadMessage('')
+    setUploadMessageTone('info')
   }
 
   const renderOverview = () => (
@@ -1640,6 +1650,7 @@ function App() {
                         setSelectedFiles([])
                         setImagePreviews([])
                         setUploadMessage('')
+                        setUploadMessageTone('info')
                         setUploadProgress({ completed: 0, total: 0 })
                         setUploadByteProgress({ sent: 0, total: 0 })
                         setUploadComplete(false)
@@ -1679,10 +1690,30 @@ function App() {
 
               <Button type="button" size="sm" onClick={handleUpload} disabled={!supabase || selectedFiles.length === 0 || uploading || fileDialogSaving}>
                 <Upload size={14} aria-hidden="true" />
-                {uploading ? 'Enviando...' : `Enviar ${selectedFiles.length || ''} arquivo(s)`}
+                {uploading ? 'Enviando...' : !supabase ? 'Supabase não configurado' : `Enviar ${selectedFiles.length || ''} arquivo(s)`}
               </Button>
 
-              {uploadMessage && <p className="status-message">{uploadMessage}</p>}
+              {!supabase && (
+                <p className="status-message upload-feedback error" role="alert">
+                  O envio está desativado porque o app não recebeu a configuração do Supabase. Na Vercel, cadastre
+                  {' '}VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY em Settings → Environment Variables e faça um novo deploy.
+                  Não use a chave service_role no frontend.
+                </p>
+              )}
+              {supabase && selectedFiles.length === 0 && (
+                <p className="status-message upload-feedback info" role="status">
+                  Selecione um ou mais arquivos para habilitar o envio.
+                </p>
+              )}
+              {uploadMessage && (
+                <p
+                  className={`status-message upload-feedback ${uploadMessageTone}`}
+                  role={uploadMessageTone === 'error' ? 'alert' : 'status'}
+                  aria-live={uploadMessageTone === 'error' ? 'assertive' : 'polite'}
+                >
+                  {uploadMessage}
+                </p>
+              )}
 
               <Suspense fallback={<div className="transfer-illustration-placeholder" aria-hidden="true" />}>
                 <TransferAnimation active={uploading} complete={uploadComplete} progress={uploadPercent} />

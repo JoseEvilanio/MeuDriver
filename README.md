@@ -21,6 +21,16 @@ npm install
 npm run dev
 ```
 
+## Deploy na Vercel
+
+Cadastre as variáveis em **Project Settings > Environment Variables**:
+
+- `VITE_SUPABASE_URL` — URL do projeto Supabase.
+- `VITE_SUPABASE_ANON_KEY` — chave pública (anon/publishable) do projeto; nunca use `service_role` no frontend.
+- `VITE_SUPABASE_BUCKET` — opcional; o padrão é `MeuDriver`.
+
+Inclua as variáveis no ambiente **Production** (e também em Preview, se necessário) e faça um novo deploy depois de alterá-las, pois o Vite incorpora os valores durante a build. Se o login funcionar, mas o envio falhar por RLS, aplique as migrations de Storage descritas abaixo no mesmo projeto Supabase.
+
 ## Upload de arquivos
 
 Na seção de upload, é possível selecionar vários arquivos de uma vez ou escolher uma pasta. O conteúdo é enviado ao bucket configurado no Supabase Storage; ao enviar uma pasta, os caminhos das subpastas são preservados. Nomes com espaços, acentos ou caracteres especiais são codificados com segurança na chave do Storage; o caminho original é mantido nos metadados do objeto (`originalPath`). Imagens selecionadas aparecem com prévia antes do envio.
