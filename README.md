@@ -6,7 +6,7 @@ Aplicação web de armazenamento de arquivos com Supabase Auth e Supabase Storag
 
 O app permite autenticar, enviar arquivos e pastas, retomar envios interrompidos, atualizar objetos existentes, consultar e pesquisar os objetos acessíveis no Storage e baixar arquivos. O catálogo e os arquivos baixados são mantidos em cache no IndexedDB do navegador, separados por usuário e bucket. O explorador mostra 10 arquivos por página, com ícones por tipo. O painel mostra contagem, pastas e tamanho calculados a partir dos objetos listados no bucket.
 
-O explorador e os indicadores estão limitados ao prefixo do ID do usuário autenticado. As políticas RLS necessárias precisam estar aplicadas no projeto Supabase. Com uma sessão ativa, mudanças no bucket são recebidas pelo Supabase Realtime e atualizam a listagem automaticamente enquanto a aplicação está aberta. Se não houver sessão, o app solicita login em vez de mostrar conteúdo demonstrativo.
+Colaboradores veem e gerenciam somente os próprios arquivos. Gerentes e Master podem acessar todos os arquivos do bucket; somente o Master administra usuários e altera níveis. As políticas RLS necessárias precisam estar aplicadas no projeto Supabase. Com uma sessão ativa, mudanças no bucket são recebidas pelo Supabase Realtime e atualizam a listagem automaticamente enquanto a aplicação está aberta. Se não houver sessão, o app solicita login em vez de mostrar conteúdo demonstrativo.
 
 Fila offline persistente, monitoramento de pastas locais, histórico de atividade, dispositivos conectados, compartilhamentos e permissões por empresa dependem de serviços ainda não conectados. As atualizações em tempo real não são um serviço de sincronização em segundo plano: a aba precisa permanecer aberta e eventos ocorridos enquanto desconectado são recuperados na próxima leitura do Storage.
 
@@ -28,6 +28,7 @@ Cadastre as variáveis em **Project Settings > Environment Variables**:
 - `VITE_SUPABASE_URL` — URL do projeto Supabase.
 - `VITE_SUPABASE_ANON_KEY` — chave pública (anon/publishable) do projeto; nunca use `service_role` no frontend.
 - `VITE_SUPABASE_BUCKET` — opcional; o padrão é `MeuDriver`.
+- `VITE_APP_URL` — URL estável de produção para o link de conclusão de convites (padrão: `https://meu-driver.vercel.app`).
 
 Inclua as variáveis no ambiente **Production** (e também em Preview, se necessário) e faça um novo deploy depois de alterá-las, pois o Vite incorpora os valores durante a build. Se o login funcionar, mas o envio falhar por RLS, aplique as migrations de Storage descritas abaixo no mesmo projeto Supabase.
 
@@ -43,9 +44,9 @@ Antes do primeiro envio, crie no painel Supabase (Storage > Buckets) um bucket c
 
 ## Usuários e níveis de acesso
 
-Na tela **Permissões**, o usuário Master pode convidar colaboradores por e-mail. Todo usuário criado por convite recebe o nível Colaborador e precisa definir uma senha ao abrir o link. O convite usa a Edge Function `manage-users`, que valida a sessão e o nível Master antes de chamar a API administrativa do Supabase. Para implantá-la pela CLI, use `supabase functions deploy manage-users --project-ref <PROJECT_ID>`. A chave `service_role` deve permanecer somente no ambiente seguro da Edge Function; nunca a coloque em `VITE_*` nem no frontend.
+Na tela **Permissões**, o usuário Master pode convidar usuários e alterar os níveis entre Colaborador e Gerente. Novas contas recebem o nível Colaborador e precisam definir uma senha ao abrir o convite. O Gerente tem acesso a todos os arquivos, mas não pode administrar usuários nem alterar níveis; somente o Master pode fazê-lo. A Edge Function `manage-users` valida a sessão e o nível Master, envia/renova convites para `VITE_APP_URL` e processa alterações de nível. Para implantá-la pela CLI, use `supabase functions deploy manage-users --project-ref <PROJECT_ID>`. A chave `service_role` deve permanecer somente no ambiente seguro da Edge Function; nunca a coloque em `VITE_*` nem no frontend.
 
-Configure um servidor SMTP de produção em **Authentication > SMTP Settings** para que os convites sejam entregues. Em **Authentication > URL Configuration > Redirect URLs**, permita a URL do app e a de desenvolvimento, por exemplo `https://seu-dominio.vercel.app/**` e `http://localhost:5173/**`. O domínio usado para enviar o convite precisa estar permitido pelo Supabase Auth.
+Configure um servidor SMTP de produção em **Authentication > SMTP Settings** para que os convites sejam entregues. Em **Authentication > URL Configuration > Site URL**, defina `https://meu-driver.vercel.app`; em **Redirect URLs**, permita `https://meu-driver.vercel.app/**` e a URL de desenvolvimento, por exemplo `http://localhost:5173/**`. Convites agora sempre retornam ao domínio estável de produção, não ao endereço temporário de Preview.
 
 Para reforçar o isolamento em produção, rode `npm run security:rls` e verifique que não reste uma policy permissiva de upload para todos os usuários autenticados (`authenticated_upload_to_meudriver`) no diretório `supabase/migrations`.
 

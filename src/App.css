@@ -979,6 +979,21 @@ tbody td:first-child {
   gap: 6px;
 }
 
+.user-role-select {
+  min-width: 132px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+}
+
+.user-role-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .status-message.error {
   color: var(--destructive);
 }

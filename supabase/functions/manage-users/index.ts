@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
+const productionAppOrigin = "https://meu-driver.vercel.app";
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, apikey, content-type, x-client-info",
@@ -35,10 +36,9 @@ Deno.serve(async (request: Request) => {
     }
 
     if (!authorization?.startsWith("Bearer ")) {
-      return jsonResponse({ error: "Faça login para convidar usuários." }, 401);
+      return jsonResponse({ error: "Faça login para administrar usuários." }, 401);
     }
 
-    const origin = request.headers.get("origin");
     let payload: unknown;
     try {
       payload = await request.json();
@@ -46,33 +46,15 @@ Deno.serve(async (request: Request) => {
       return jsonResponse({ error: "O corpo da solicitação não contém JSON válido." }, 400);
     }
 
-    if (typeof payload !== "object" || payload === null || !("email" in payload) || !("redirectTo" in payload)) {
-      return jsonResponse({ error: "Informe o e-mail e o endereço de retorno do convite." }, 400);
+    if (typeof payload !== "object" || payload === null) {
+      return jsonResponse({ error: "Os dados da solicitação são inválidos." }, 400);
     }
 
-    const { email, redirectTo } = payload;
-    if (typeof email !== "string" || typeof redirectTo !== "string") {
-      return jsonResponse({ error: "Os dados do convite são inválidos." }, 400);
-    }
-
-    const normalizedEmail = email.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
-      return jsonResponse({ error: "Informe um endereço de e-mail válido." }, 400);
-    }
-
-    let redirectUrl: URL;
-    try {
-      redirectUrl = new URL(redirectTo);
-    } catch {
-      return jsonResponse({ error: "O endereço de retorno do convite é inválido." }, 400);
-    }
-
-    if (
-      !origin ||
-      redirectUrl.origin !== origin ||
-      redirectUrl.searchParams.get("invite") !== "accepted"
-    ) {
-      return jsonResponse({ error: "O endereço de retorno deve ser do mesmo site que enviou o convite." }, 400);
+    const action = "action" in payload && typeof payload.action === "string"
+      ? payload.action
+      : "invite";
+    if (action !== "invite" && action !== "set_role") {
+      return jsonResponse({ error: "Ação de administração inválida." }, 400);
     }
 
     const callerClient = createClient(supabaseUrl, anonKey, {
@@ -101,16 +83,89 @@ Deno.serve(async (request: Request) => {
     const isMaster = callerData.user.email?.toLowerCase() === "jose_evilanio@hotmail.com" ||
       callerProfile?.role === "master";
     if (!isMaster) {
-      return jsonResponse({ error: "Somente usuários Master podem convidar colaboradores." }, 403);
+      return jsonResponse({ error: "Somente usuários Master podem administrar usuários e níveis." }, 403);
+    }
+
+    if (action === "set_role") {
+      if (
+        !("userId" in payload) ||
+        typeof payload.userId !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(payload.userId) ||
+        !("role" in payload) ||
+        (payload.role !== "manager" && payload.role !== "collaborator")
+      ) {
+        return jsonResponse({ error: "Informe um usuário e o nível Colaborador ou Gerente." }, 400);
+      }
+
+      const { data: target, error: targetError } = await adminClient
+        .from("user_profiles")
+        .select("id, email, role")
+        .eq("id", payload.userId)
+        .maybeSingle();
+
+      if (targetError) {
+        console.error("Could not load the target user's profile:", targetError.message);
+        return jsonResponse({ error: "Não foi possível verificar o usuário selecionado." }, 500);
+      }
+      if (!target) {
+        return jsonResponse({ error: "O usuário selecionado não foi encontrado." }, 404);
+      }
+      if (target.role === "master" || target.email?.toLowerCase() === "jose_evilanio@hotmail.com") {
+        return jsonResponse({ error: "O nível da conta Master não pode ser alterado." }, 403);
+      }
+
+      const { data: updatedUser, error: updateError } = await adminClient
+        .from("user_profiles")
+        .update({ role: payload.role })
+        .eq("id", target.id)
+        .select("id, email, role, created_at")
+        .single();
+
+      if (updateError || !updatedUser) {
+        console.error("Could not update the user's access role:", updateError?.message);
+        return jsonResponse({ error: "Não foi possível salvar o novo nível de acesso." }, 500);
+      }
+
+      return jsonResponse({ user: updatedUser });
+    }
+
+    if (!("email" in payload) || typeof payload.email !== "string") {
+      return jsonResponse({ error: "Informe um e-mail válido para o convite." }, 400);
+    }
+
+    const normalizedEmail = payload.email.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      return jsonResponse({ error: "Informe um endereço de e-mail válido." }, 400);
     }
 
     if (normalizedEmail === "jose_evilanio@hotmail.com") {
       return jsonResponse({ error: "A conta Master já está configurada." }, 409);
     }
 
+    if (!("redirectTo" in payload) || typeof payload.redirectTo !== "string") {
+      return jsonResponse({ error: "O endereço de retorno do convite é inválido." }, 400);
+    }
+
+    let redirectUrl: URL;
+    try {
+      redirectUrl = new URL(payload.redirectTo);
+    } catch {
+      return jsonResponse({ error: "O endereço de retorno do convite é inválido." }, 400);
+    }
+
+    if (
+      redirectUrl.origin !== productionAppOrigin ||
+      redirectUrl.pathname !== "/" ||
+      redirectUrl.searchParams.get("invite") !== "accepted" ||
+      [...redirectUrl.searchParams.keys()].some((key) => key !== "invite") ||
+      redirectUrl.hash
+    ) {
+      return jsonResponse({ error: "O convite deve retornar ao endereço oficial do MeuDrive." }, 400);
+    }
+
     const { data: existingProfile, error: existingProfileError } = await adminClient
       .from("user_profiles")
-      .select("role")
+      .select("id, role")
       .eq("email", normalizedEmail)
       .maybeSingle();
 
@@ -128,19 +183,33 @@ Deno.serve(async (request: Request) => {
       { redirectTo: redirectUrl.toString() },
     );
 
+    let invitedUserId = inviteData.user?.id ?? null;
     if (inviteError) {
-      console.error("Could not send the collaborator invitation:", inviteError.message);
-      return jsonResponse({ error: inviteError.message }, inviteError.status || 400);
+      if (inviteError.status === 422 && existingProfile) {
+        const { data: resendData, error: resendError } = await adminClient.auth.resend({
+          type: "signup",
+          email: normalizedEmail,
+          options: { redirectTo: redirectUrl.toString() },
+        });
+        if (resendError) {
+          console.error("Could not resend the collaborator invitation:", resendError.message);
+          return jsonResponse({ error: resendError.message }, resendError.status || 400);
+        }
+        invitedUserId = resendData.user?.id ?? existingProfile.id;
+      } else {
+        console.error("Could not send the collaborator invitation:", inviteError.message);
+        return jsonResponse({ error: inviteError.message }, inviteError.status || 400);
+      }
     }
 
-    if (!inviteData.user) {
+    if (!invitedUserId) {
       return jsonResponse({ error: "O Supabase não retornou o usuário convidado." }, 502);
     }
 
     const { data: invitedProfile, error: invitedProfileError } = await adminClient
       .from("user_profiles")
       .select("id, email, role, created_at")
-      .eq("id", inviteData.user.id)
+      .eq("id", invitedUserId)
       .single();
 
     if (invitedProfileError || !invitedProfile) {
@@ -150,9 +219,9 @@ Deno.serve(async (request: Request) => {
       }, 500);
     }
 
-    return jsonResponse({ user: invitedProfile }, 201);
+    return jsonResponse({ user: invitedProfile }, existingProfile ? 200 : 201);
   } catch (error) {
-    console.error("Unexpected error while sending a collaborator invitation:", error);
-    return jsonResponse({ error: "Ocorreu um erro inesperado ao enviar o convite." }, 500);
+    console.error("Unexpected error while managing users:", error);
+    return jsonResponse({ error: "Ocorreu um erro inesperado ao administrar usuários." }, 500);
   }
 });

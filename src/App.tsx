@@ -43,7 +43,7 @@ import {
   saveCachedFile,
   type CachedFile,
 } from './lib/local-cache'
-import { storageBucket, supabase, supabaseAnonKey, supabaseUrl } from './lib/supabase'
+import { appUrl, storageBucket, supabase, supabaseAnonKey, supabaseUrl } from './lib/supabase'
 import { FileDialog, type PreviewKind } from './components/file-dialog'
 
 const TransferAnimation = lazy(async () => {
@@ -78,7 +78,7 @@ type StorageSnapshot = {
   folders: string[]
 }
 
-type AccessRole = 'master' | 'collaborator'
+type AccessRole = 'master' | 'manager' | 'collaborator'
 
 type ManagedUser = {
   id: string
@@ -375,6 +375,7 @@ function App() {
   const loadGenerationRef = useRef(0)
   const fileDialogGenerationRef = useRef(0)
   const isMaster = accessRole === 'master' || sessionEmail.toLocaleLowerCase() === masterEmail
+  const canAccessAllFiles = isMaster || accessRole === 'manager'
 
   const triggerStorageRefresh = () => {
     setSyncing(true)
@@ -410,7 +411,7 @@ function App() {
       .includes(search.toLocaleLowerCase())),
   ), [isMaster, search, storageSnapshot.files, userEmailById])
   const displayStoragePath = (path: string) => {
-    if (!isMaster) {
+    if (!canAccessAllFiles) {
       return path
     }
 
@@ -521,7 +522,11 @@ function App() {
         }
 
         if (!cancelled) {
-          setAccessRole(data?.role === 'master' ? 'master' : 'collaborator')
+          setAccessRole(
+            data?.role === 'master' || data?.role === 'manager'
+              ? data.role
+              : 'collaborator',
+          )
           setAccessError('')
         }
       } catch (error) {
@@ -557,7 +562,9 @@ function App() {
           throw error
         }
         if (!cancelled) {
-          setManagedUsers((data ?? []).filter((user) => user.role === 'master' || user.role === 'collaborator'))
+          setManagedUsers((data ?? []).filter((user) =>
+            user.role === 'master' || user.role === 'manager' || user.role === 'collaborator',
+          ))
         }
       } catch (error) {
         if (!cancelled) {
@@ -705,7 +712,7 @@ function App() {
                 : decodedPath
               const ownerId = relativePath.split('/')[0]
               const ownerRelativePath = decodeStoragePath(relativePath.split('/').slice(1).join('/'))
-              const originalPath = isMaster
+              const originalPath = canAccessAllFiles
                 ? `${ownerId}/${storedOriginalPath === decodedPath ? ownerRelativePath : storedOriginalPath}`
                 : storedOriginalPath
               const metadataSize = entry.metadata && typeof entry.metadata === 'object' && 'size' in entry.metadata
@@ -740,7 +747,7 @@ function App() {
           }
         }
 
-        await readFolder(isMaster ? '' : sessionUserId, '')
+        await readFolder(canAccessAllFiles ? '' : sessionUserId, '')
         for (const file of files) {
           const segments = file.path.split('/')
           segments.slice(0, -1).forEach((_segment, index) => {
@@ -799,7 +806,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [isMaster, sessionUserId, storageRefreshKey])
+  }, [canAccessAllFiles, sessionUserId, storageRefreshKey])
 
   const inviteCollaborator = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -816,7 +823,7 @@ function App() {
       const { data, error } = await supabase.functions.invoke<{ user: ManagedUser }>('manage-users', {
         body: {
           email: inviteEmail.trim(),
-          redirectTo: `${window.location.origin}/?invite=accepted`,
+          redirectTo: `${appUrl}/?invite=accepted`,
         },
       })
 
@@ -850,6 +857,45 @@ function App() {
       setManagementError(error instanceof Error ? error.message : 'Não foi possível enviar o convite.')
     } finally {
       setInviteSubmitting(false)
+    }
+  }
+
+  const changeManagedUserRole = async (userId: string, role: 'manager' | 'collaborator') => {
+    if (!supabase || !isMaster) {
+      setManagementError('Somente o Master pode alterar níveis de acesso.')
+      return
+    }
+
+    setManagementError('')
+    setManagementMessage('')
+    try {
+      const { data, error } = await supabase.functions.invoke<{ user: ManagedUser }>('manage-users', {
+        body: { action: 'set_role', userId, role },
+      })
+
+      if (error) {
+        const context = error.context
+        if (context instanceof Response) {
+          const responseBody: unknown = await context.clone().json().catch(() => null)
+          if (
+            typeof responseBody === 'object' &&
+            responseBody !== null &&
+            'error' in responseBody &&
+            typeof responseBody.error === 'string'
+          ) {
+            throw new Error(responseBody.error)
+          }
+        }
+        throw error
+      }
+
+      if (!data?.user) {
+        throw new Error('O Supabase não confirmou a alteração do nível.')
+      }
+      setManagedUsers((users) => users.map((user) => user.id === data.user.id ? data.user : user))
+      setManagementMessage(`Nível de ${data.user.email ?? 'usuário'} atualizado para ${role === 'manager' ? 'Gerente' : 'Colaborador'}.`)
+    } catch (error) {
+      setManagementError(error instanceof Error ? error.message : 'Não foi possível alterar o nível de acesso.')
     }
   }
 
@@ -1156,11 +1202,11 @@ function App() {
       if (!session || session.user.id !== sessionUserId) {
         throw new Error('Faça login novamente para atualizar este arquivo.')
       }
-      if (!isMaster && !file.objectPath.startsWith(`${session.user.id}/`)) {
+      if (!canAccessAllFiles && !file.objectPath.startsWith(`${session.user.id}/`)) {
         throw new Error('O arquivo não pertence à conta autenticada.')
       }
 
-      const originalPath = isMaster ? file.path.split('/').slice(1).join('/') : file.path
+      const originalPath = canAccessAllFiles ? file.path.split('/').slice(1).join('/') : file.path
       if (replacement.size > 6 * 1024 * 1024) {
         await uploadLargeFile(
           replacement,
@@ -1990,16 +2036,16 @@ function App() {
           </thead>
           <tbody>
             <tr><td>Usuário autenticado</td><td>{sessionEmail || 'Nenhum'}</td></tr>
-            <tr><td>Nível de acesso</td><td>{isMaster ? 'Master' : accessRole === 'collaborator' ? 'Colaborador' : 'Verificando…'}</td></tr>
+            <tr><td>Nível de acesso</td><td>{isMaster ? 'Master' : accessRole === 'manager' ? 'Gerente' : accessRole === 'collaborator' ? 'Colaborador' : 'Verificando…'}</td></tr>
             <tr><td>Bucket</td><td>{storageBucket}</td></tr>
             <tr><td>Objetos acessíveis nesta sessão</td><td>{storageError ? 'Falha ao consultar' : storageLoading ? 'Consultando...' : storageSnapshot.files.length.toLocaleString('pt-BR')}</td></tr>
-            <tr><td>Escopo</td><td>{isMaster ? 'Todos os arquivos e pastas do bucket' : 'Somente os arquivos e pastas desta conta'}</td></tr>
+            <tr><td>Escopo</td><td>{canAccessAllFiles ? 'Todos os arquivos e pastas do bucket' : 'Somente os arquivos e pastas desta conta'}</td></tr>
           </tbody>
         </table>
       </div>
       {accessError && <p className="status-message" role="alert">Não foi possível carregar o perfil: {accessError}</p>}
       <p className="muted mt">
-        O Supabase aplica o isolamento no banco e no Storage: colaboradores acessam somente o próprio prefixo; a conta Master pode administrar todos os objetos.
+        O Supabase aplica o isolamento no banco e no Storage: colaboradores acessam somente os próprios objetos; Gerentes e Master têm acesso aos arquivos de todos os usuários.
       </p>
 
       {isMaster && (
@@ -2007,7 +2053,7 @@ function App() {
           <div className="panel-header">
             <div>
               <h3>Usuários e convites</h3>
-              <p className="muted">Novas contas recebem automaticamente o nível Colaborador.</p>
+              <p className="muted">Novas contas recebem o nível Colaborador. Somente Master altera os níveis.</p>
             </div>
             <span className="badge neutral">
               {managedUsersLoading ? 'Carregando...' : `${managedUsers.length} usuário(s)`}
@@ -2049,7 +2095,26 @@ function App() {
                 {managedUsers.map((user) => (
                   <tr key={user.id}>
                     <td>{user.email || 'E-mail não informado'}</td>
-                    <td>{user.role === 'master' ? 'Master' : 'Colaborador'}</td>
+                    <td>
+                      {user.role === 'master' ? (
+                        'Master'
+                      ) : (
+                        <select
+                          className="user-role-select"
+                          aria-label={`Nível de ${user.email ?? 'usuário'}`}
+                          value={user.role}
+                          onChange={(event) => {
+                            const value = event.target.value
+                            if (value === 'manager' || value === 'collaborator') {
+                              void changeManagedUserRole(user.id, value)
+                            }
+                          }}
+                        >
+                          <option value="collaborator">Colaborador</option>
+                          <option value="manager">Gerente</option>
+                        </select>
+                      )}
+                    </td>
                     <td>{formatModifiedDate(user.created_at)}</td>
                   </tr>
                 ))}
