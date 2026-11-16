@@ -419,6 +419,16 @@ function App() {
     const ownerEmail = userEmailById.get(ownerId)
     return ownerEmail ? [ownerEmail, ...remainingPath].join('/') : path
   }
+  const displayStorageFolderPath = (path: string) => {
+    if (!canAccessAllFiles) {
+      return path
+    }
+
+    const [ownerId, ...remainingPath] = path.split('/')
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ownerId)
+      ? remainingPath.join('/') || 'Arquivos na raiz'
+      : path
+  }
   const folderFilesByPath = useMemo(() => {
     const filesByPath = new Map<string, StoredFile[]>()
 
@@ -432,12 +442,19 @@ function App() {
     return filesByPath
   }, [filteredFiles])
   const explorerFolders = useMemo(() => {
-    const folders = [...storageSnapshot.folders]
+    const directFileFolders = new Set(storageSnapshot.files.map((file) =>
+      file.path.slice(0, file.path.lastIndexOf('/')),
+    ))
+    const folders = storageSnapshot.folders.filter((folder) => {
+      const isOwnerRoot = canAccessAllFiles &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(folder)
+      return !isOwnerRoot || directFileFolders.has(folder)
+    })
     if (folderFilesByPath.has('')) {
       folders.unshift('')
     }
     return folders
-  }, [folderFilesByPath, storageSnapshot.folders])
+  }, [canAccessAllFiles, folderFilesByPath, storageSnapshot.files, storageSnapshot.folders])
   const totalStorageBytes = storageSnapshot.files.reduce((sum, file) => sum + file.size, 0)
   const recentFiles = useMemo(() => [...storageSnapshot.files]
     .sort((left, right) => (right.updatedAt ?? '').localeCompare(left.updatedAt ?? ''))
@@ -1871,7 +1888,7 @@ function App() {
             >
               <summary>
                 <FolderOpen size={17} aria-hidden="true" />
-                <span className="folder-dropdown-name">{folder ? displayStoragePath(folder) : 'Arquivos na raiz'}</span>
+                <span className="folder-dropdown-name">{folder ? displayStorageFolderPath(folder) : 'Arquivos na raiz'}</span>
                 <span className="badge neutral">{folderFiles.length} arquivo(s)</span>
                 <ChevronDown className="folder-dropdown-chevron" size={16} aria-hidden="true" />
               </summary>
@@ -1885,11 +1902,11 @@ function App() {
                       type="button"
                       variant="destructive"
                       size="sm"
-                      onClick={() => void deleteStoredFiles(folderFilesForDeletion, `a pasta "${displayStoragePath(folder)}"`)}
+                      onClick={() => void deleteStoredFiles(folderFilesForDeletion, `a pasta "${displayStorageFolderPath(folder)}"`)}
                       disabled={Boolean(deletingPath)}
                     >
                       <Trash2 size={14} aria-hidden="true" />
-                      {deletingPath === `a pasta "${displayStoragePath(folder)}"` ? 'Excluindo...' : 'Excluir pasta'}
+                      {deletingPath === `a pasta "${displayStorageFolderPath(folder)}"` ? 'Excluindo...' : 'Excluir pasta'}
                     </Button>
                   </div>
                 )}
