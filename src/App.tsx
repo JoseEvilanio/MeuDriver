@@ -330,6 +330,7 @@ function App() {
   const [managedUsersLoading, setManagedUsersLoading] = useState(false)
   const [managementError, setManagementError] = useState('')
   const [managementMessage, setManagementMessage] = useState('')
+  const activeSessionUserIdRef = useRef('')
   const [inviteEmail, setInviteEmail] = useState('')
   const [inviteSubmitting, setInviteSubmitting] = useState(false)
   const [inviteSetupRequired, setInviteSetupRequired] = useState(
@@ -488,9 +489,18 @@ function App() {
         throw error
       }
 
+      const nextSessionUserId = data.session?.user?.id ?? ''
+      if (activeSessionUserIdRef.current !== nextSessionUserId) {
+        activeSessionUserIdRef.current = nextSessionUserId
+        setManagedUsers([])
+        setManagedUsersLoading(false)
+        setManagementError('')
+        setManagementMessage('')
+      }
+
       setSessionEmail(data.session?.user?.email ?? '')
       setEmail(data.session?.user?.email ?? '')
-      setSessionUserId(data.session?.user?.id ?? '')
+      setSessionUserId(nextSessionUserId)
       setAccessRole(null)
       setAccessError('')
       setStorageSnapshot(emptyStorageSnapshot)
@@ -501,15 +511,20 @@ function App() {
     })
 
     const { data: subscription } = supabase.auth.onAuthStateChange((_event, session) => {
+      const nextSessionUserId = session?.user?.id ?? ''
+      if (activeSessionUserIdRef.current !== nextSessionUserId) {
+        activeSessionUserIdRef.current = nextSessionUserId
+        setManagedUsers([])
+        setManagedUsersLoading(false)
+        setManagementError('')
+        setManagementMessage('')
+      }
+
       setSessionEmail(session?.user?.email ?? '')
       setEmail(session?.user?.email ?? '')
-      setSessionUserId(session?.user?.id ?? '')
+      setSessionUserId(nextSessionUserId)
       setAccessRole(null)
       setAccessError('')
-      setManagedUsers([])
-      setManagedUsersLoading(false)
-      setManagementError('')
-      setManagementMessage('')
       setStorageSnapshot(emptyStorageSnapshot)
       setStorageError('')
       setLastSyncedAt(null)
@@ -563,7 +578,7 @@ function App() {
   useEffect(() => {
     const supabaseClient = supabase
     let cancelled = false
-    if (!supabaseClient || !isMaster) {
+    if (!supabaseClient || !isMaster || !sessionUserId) {
       return
     }
 
@@ -599,7 +614,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [isMaster])
+  }, [isMaster, sessionUserId])
 
   useEffect(() => {
     const supabaseClient = supabase
