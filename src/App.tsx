@@ -1,5 +1,7 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
+import * as Dialog from '@radix-ui/react-dialog'
 import {
+  CheckCircle2,
   Cloud,
   ChevronDown,
   Download,
@@ -322,6 +324,7 @@ function App() {
   const [uploadProgress, setUploadProgress] = useState({ completed: 0, total: 0 })
   const [uploadByteProgress, setUploadByteProgress] = useState({ sent: 0, total: 0 })
   const [uploadComplete, setUploadComplete] = useState(false)
+  const [uploadSuccessOpen, setUploadSuccessOpen] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null)
   const [clock, setClock] = useState(() => Date.now())
@@ -1174,9 +1177,7 @@ function App() {
       setUploadByteProgress({ sent: totalBytes, total: totalBytes })
       setUploadMessage(`${uploadedCount} arquivo(s) enviado(s) para o bucket "${storageBucket}", mantendo a estrutura de pastas.`)
       setUploadMessageTone('success')
-      previewGeneration.current += 1
-      setSelectedFiles([])
-      setImagePreviews([])
+      setUploadSuccessOpen(true)
     } catch (error) {
       const message = getUploadErrorMessage(error)
       const normalizedMessage = message.toLowerCase()
@@ -1208,6 +1209,18 @@ function App() {
         triggerStorageRefresh()
       }
     }
+  }
+
+  const acknowledgeUploadSuccess = () => {
+    setUploadSuccessOpen(false)
+    previewGeneration.current += 1
+    setSelectedFiles([])
+    setImagePreviews([])
+    setUploadMessage('')
+    setUploadMessageTone('info')
+    setUploadProgress({ completed: 0, total: 0 })
+    setUploadByteProgress({ sent: 0, total: 0 })
+    setUploadComplete(false)
   }
 
   const addSelectedFiles = (fileList: FileList | null) => {
@@ -1327,7 +1340,11 @@ function App() {
           <div className="mini-card">
             <span className="eyebrow">Lote selecionado</span>
             <h4>{uploading ? `${uploadProgress.completed} de ${uploadProgress.total} enviados` : `${selectedFiles.length} arquivo(s)`}</h4>
-            <p>{uploadMessage || (uploadComplete ? 'Último envio concluído.' : 'A fila existe somente enquanto este app está aberto.')}</p>
+            <p>
+              {uploadMessageTone === 'success'
+                ? ''
+                : uploadMessage || (uploadComplete ? 'Último envio concluído.' : 'A fila existe somente enquanto este app está aberto.')}
+            </p>
           </div>
         </article>
       </section>
@@ -1427,7 +1444,11 @@ function App() {
         <div className="mini-card">
           <span className="eyebrow">Envio desta sessão</span>
           <h4>{uploading ? `${uploadPercent}%` : uploadComplete ? 'Concluído' : 'Inativo'}</h4>
-          <p>{uploading ? `${uploadProgress.completed} de ${uploadProgress.total} arquivos concluídos` : uploadMessage || 'Nenhuma fila persistente está configurada.'}</p>
+          <p>
+            {uploading
+              ? `${uploadProgress.completed} de ${uploadProgress.total} arquivos concluídos`
+              : uploadMessageTone === 'success' ? '' : uploadMessage || 'Nenhuma fila persistente está configurada.'}
+          </p>
         </div>
       </div>
 
@@ -1889,7 +1910,7 @@ function App() {
                   Selecione um ou mais arquivos para habilitar o envio.
                 </p>
               )}
-              {uploadMessage && (
+              {uploadMessage && uploadMessageTone !== 'success' && (
                 <p
                   className={`status-message upload-feedback ${uploadMessageTone}`}
                   role={uploadMessageTone === 'error' ? 'alert' : 'status'}
@@ -1970,6 +1991,36 @@ function App() {
         }}
         onDownload={downloadDialogFile}
       />
+      <Dialog.Root
+        open={uploadSuccessOpen}
+        onOpenChange={(open) => {
+          if (open) {
+            setUploadSuccessOpen(true)
+          }
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="login-overlay" />
+          <Dialog.Content
+            className="upload-success-dialog"
+            onEscapeKeyDown={(event) => event.preventDefault()}
+            onPointerDownOutside={(event) => event.preventDefault()}
+          >
+            <div className="upload-success-header">
+              <span className="upload-success-icon"><CheckCircle2 size={22} aria-hidden="true" /></span>
+              <div>
+                <Dialog.Title className="login-dialog-title">Upload concluído</Dialog.Title>
+                <Dialog.Description className="upload-success-description">
+                  {uploadProgress.completed.toLocaleString('pt-BR')} arquivo(s) enviado(s) com sucesso. Clique em OK para limpar a seleção e preparar um novo envio.
+                </Dialog.Description>
+              </div>
+            </div>
+            <div className="upload-success-actions">
+              <Button type="button" onClick={acknowledgeUploadSuccess}>OK</Button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </div>
   )
 }

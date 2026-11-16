@@ -1084,6 +1084,52 @@ tbody td:first-child {
   animation: dialog-in 170ms ease-out;
 }
 
+.upload-success-dialog {
+  position: fixed;
+  z-index: 21;
+  top: 50%;
+  left: 50%;
+  width: min(calc(100vw - 32px), 440px);
+  padding: 22px;
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  outline: none;
+  background: var(--card);
+  box-shadow: 0 20px 60px rgb(9 9 11 / 0.18);
+  animation: dialog-in 170ms ease-out;
+}
+
+.upload-success-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.upload-success-icon {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  flex: 0 0 40px;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--success-muted);
+  color: var(--success);
+}
+
+.upload-success-description {
+  margin: 6px 0 0;
+  color: var(--muted-foreground);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.upload-success-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
 .file-dialog {
   position: fixed;
   z-index: 21;
