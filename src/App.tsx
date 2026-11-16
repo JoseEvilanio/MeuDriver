@@ -278,6 +278,7 @@ function App() {
   const [activeView, setActiveView] = useState<(typeof navItems)[number]['id']>('overview')
   const [search, setSearch] = useState('')
   const [folderPages, setFolderPages] = useState<Record<string, number>>({})
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loginOpen, setLoginOpen] = useState(false)
@@ -1038,6 +1039,14 @@ function App() {
     } finally {
       uploadInProgressRef.current = false
       setUploading(false)
+      if (uploadedCount > 0) {
+        setSearch('')
+        setFolderPages({})
+        setExpandedFolders(new Set(
+          selectedFiles.map((file) => getFilePath(file).split('/').slice(0, -1).join('/')),
+        ))
+        setActiveView('files')
+      }
       if (uploadedCount > 0 || refreshPendingRef.current) {
         refreshPendingRef.current = false
         triggerStorageRefresh()
@@ -1318,7 +1327,26 @@ function App() {
           )
 
           return (
-            <details className="folder-dropdown" key={folder || '__root__'}>
+            <details
+              className="folder-dropdown"
+              key={folder || '__root__'}
+              open={expandedFolders.has(folder)}
+              onToggle={(event) => {
+                const isOpen = event.currentTarget.open
+                setExpandedFolders((current) => {
+                  if (current.has(folder) === isOpen) {
+                    return current
+                  }
+                  const next = new Set(current)
+                  if (isOpen) {
+                    next.add(folder)
+                  } else {
+                    next.delete(folder)
+                  }
+                  return next
+                })
+              }}
+            >
               <summary>
                 <FolderOpen size={17} aria-hidden="true" />
                 <span className="folder-dropdown-name">{folder || 'Arquivos na raiz'}</span>
