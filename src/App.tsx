@@ -94,6 +94,24 @@ function getStoragePath(path: string) {
     .join('/')
 }
 
+function decodeStoragePath(path: string) {
+  return path
+    .split('/')
+    .map((segment) => {
+      if (!/^x_(?:[0-9a-f]{2})+$/i.test(segment)) {
+        return segment
+      }
+
+      const encoded = segment.slice(2)
+      const bytes = new Uint8Array(encoded.length / 2)
+      for (let index = 0; index < bytes.length; index += 1) {
+        bytes[index] = Number.parseInt(encoded.slice(index * 2, index * 2 + 2), 16)
+      }
+      return new TextDecoder().decode(bytes)
+    })
+    .join('/')
+}
+
 function getUploadIdentity(file: File) {
   return `${getFilePath(file)}:${file.size}:${file.lastModified}`
 }
@@ -533,9 +551,10 @@ function App() {
 
             for (const entry of entries) {
               const relativePath = relativeFolder ? `${relativeFolder}/${entry.name}` : entry.name
+              const decodedPath = decodeStoragePath(relativePath)
 
               if (entry.id === null && entry.metadata === null) {
-                folders.add(relativePath)
+                folders.add(decodedPath)
                 await readFolder(`${storageFolder}/${entry.name}`, relativePath)
                 continue
               }
@@ -545,7 +564,7 @@ function App() {
                 'originalPath' in entry.metadata &&
                 typeof entry.metadata.originalPath === 'string'
                 ? entry.metadata.originalPath
-                : relativePath
+                : decodedPath
               const metadataSize = entry.metadata && typeof entry.metadata === 'object' && 'size' in entry.metadata
                 ? entry.metadata.size
                 : 0
