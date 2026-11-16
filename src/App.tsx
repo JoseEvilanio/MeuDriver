@@ -1174,6 +1174,9 @@ function App() {
       setUploadByteProgress({ sent: totalBytes, total: totalBytes })
       setUploadMessage(`${uploadedCount} arquivo(s) enviado(s) para o bucket "${storageBucket}", mantendo a estrutura de pastas.`)
       setUploadMessageTone('success')
+      previewGeneration.current += 1
+      setSelectedFiles([])
+      setImagePreviews([])
     } catch (error) {
       const message = getUploadErrorMessage(error)
       const normalizedMessage = message.toLowerCase()
