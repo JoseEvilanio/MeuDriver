@@ -700,7 +700,10 @@ function App() {
 
               if (entry.id === null && entry.metadata === null) {
                 folders.add(decodedPath)
-                await readFolder(`${storageFolder}/${entry.name}`, relativePath)
+                const nestedStorageFolder = storageFolder
+                  ? `${storageFolder}/${entry.name}`
+                  : entry.name
+                await readFolder(nestedStorageFolder, relativePath)
                 continue
               }
 
