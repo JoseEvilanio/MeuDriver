@@ -81,10 +81,20 @@ function getFilePath(file: File) {
   return file.webkitRelativePath || file.name
 }
 
+const validStoragePathSegment = /^[A-Za-z0-9_!.*'() &$=@;:+,?-]+$/
+
 function getStoragePath(path: string) {
   return path
     .split(/[\\/]/)
     .filter((segment) => segment && segment !== '.' && segment !== '..')
+    .map((segment) => {
+      if (validStoragePathSegment.test(segment) && !segment.startsWith('x_')) {
+        return segment
+      }
+
+      const hex = Array.from(new TextEncoder().encode(segment), (byte) => byte.toString(16).padStart(2, '0')).join('')
+      return `x_${hex}`
+    })
     .join('/')
 }
 
@@ -102,7 +112,7 @@ function decodeStoragePath(path: string) {
         bytes[index] = Number.parseInt(encoded.slice(index * 2, index * 2 + 2), 16)
       }
       const decoded = new TextDecoder().decode(bytes)
-      return /^[A-Za-z0-9._-]+$/.test(decoded) ? segment : decoded
+      return /^[A-Za-z0-9._-]+$/.test(decoded) && !decoded.startsWith('x_') ? segment : decoded
     })
     .join('/')
 }
@@ -322,7 +332,7 @@ function App() {
   const [uploadMessage, setUploadMessage] = useState('')
   const [uploadMessageTone, setUploadMessageTone] = useState<'info' | 'success' | 'error'>('info')
   const [uploadProgress, setUploadProgress] = useState({ completed: 0, total: 0 })
-  const [uploadByteProgress, setUploadByteProgress] = useState({ sent: 0, total: 0 })
+  const [uploadCurrentFileProgress, setUploadCurrentFileProgress] = useState(0)
   const [uploadComplete, setUploadComplete] = useState(false)
   const [uploadSuccessOpen, setUploadSuccessOpen] = useState(false)
   const [syncing, setSyncing] = useState(false)
@@ -383,11 +393,11 @@ function App() {
   const recentFiles = useMemo(() => [...storageSnapshot.files]
     .sort((left, right) => (right.updatedAt ?? '').localeCompare(left.updatedAt ?? ''))
     .slice(0, 4), [storageSnapshot.files])
-  const uploadPercent = uploadByteProgress.total > 0
-    ? Math.round((uploadByteProgress.sent / uploadByteProgress.total) * 100)
-    : uploadProgress.total
-      ? Math.round((uploadProgress.completed / uploadProgress.total) * 100)
-      : 0
+  const uploadPercent = uploadProgress.total > 0
+    ? uploadProgress.completed === uploadProgress.total
+      ? 100
+      : Math.min(99, Math.round((uploadProgress.completed + uploadCurrentFileProgress) / uploadProgress.total * 100))
+    : 0
 
   useEffect(() => {
     const interval = window.setInterval(() => setClock(Date.now()), 1000)
@@ -948,10 +958,8 @@ function App() {
     setUploadMessageTone('info')
     setUploadComplete(false)
     setUploadProgress({ completed: 0, total: selectedFiles.length })
-    const totalBytes = selectedFiles.reduce((sum, file) => sum + file.size, 0)
-    setUploadByteProgress({ sent: 0, total: totalBytes })
+    setUploadCurrentFileProgress(0)
     let uploadedCount = 0
-    let completedBytes = 0
     let currentPath = ''
     let progressKey = ''
     let completed = new Set<string>()
@@ -1043,7 +1051,7 @@ function App() {
           repeatedPaths.add(path)
         }
         pathsInBatch.add(path)
-        const rootName = path.split('/')[0]
+        const rootName = decodeStoragePath(path.split('/')[0])
         const rootFiles = filesByRoot.get(rootName) ?? []
         rootFiles.push({ path, identity })
         filesByRoot.set(rootName, rootFiles)
@@ -1081,7 +1089,7 @@ function App() {
 
         const rootCompletedPaths = new Set(rootFiles
           .filter(({ identity }) => completed.has(identity))
-          .map(({ path }) => path))
+          .map(({ path }) => decodeStoragePath(path)))
         const includesFolder = rootFiles.some(({ path }) => path.includes('/'))
         const includesRootFile = rootFiles.some(({ path }) => !path.includes('/'))
         const mixedBatchKinds = includesFolder && includesRootFile
@@ -1096,7 +1104,7 @@ function App() {
             [...rootCompletedPaths].every((path) => existingPaths.has(path))
         } else if (existing && !existing.isFolder && !includesFolder && !mixedBatchKinds) {
           canResumeThisFolder = rootFiles.every(({ path, identity }) =>
-            path === rootName && completed.has(identity),
+            decodeStoragePath(path) === rootName && completed.has(identity),
           )
         }
 
@@ -1121,14 +1129,11 @@ function App() {
       }
 
       uploadedCount = Math.min(completed.size, selectedFiles.length)
-      completedBytes = selectedFiles
-        .filter((file) => completed.has(getUploadIdentity(file)))
-        .reduce((sum, file) => sum + file.size, 0)
       setUploadProgress({ completed: uploadedCount, total: selectedFiles.length })
-      setUploadByteProgress({ sent: completedBytes, total: totalBytes })
 
       for (const file of selectedFiles) {
         currentPath = getFilePath(file)
+        setUploadCurrentFileProgress(0)
         const identity = getUploadIdentity(file)
         if (completed.has(identity)) {
           setUploadMessage(`Retomando envio: ${uploadedCount} de ${selectedFiles.length} arquivo(s) já concluídos.`)
@@ -1149,7 +1154,9 @@ function App() {
             userId,
             sessionData.session.access_token,
             false,
-            (sent) => setUploadByteProgress({ sent: completedBytes + sent, total: totalBytes }),
+            (sent) => {
+              setUploadCurrentFileProgress(file.size > 0 ? Math.min(sent / file.size, 1) : 0)
+            },
           )
         } else {
           const { error } = await supabase.storage.from(storageBucket).upload(storagePath, file, {
@@ -1165,23 +1172,24 @@ function App() {
         }
 
         uploadedCount += 1
-        completedBytes += file.size
         completed.add(identity)
         setUploadProgress({ completed: uploadedCount, total: selectedFiles.length })
-        setUploadByteProgress({ sent: completedBytes, total: totalBytes })
+        setUploadCurrentFileProgress(0)
         localStorage.setItem(progressKey, JSON.stringify({ completed: [...completed] }))
       }
 
       localStorage.removeItem(progressKey)
       setUploadComplete(true)
-      setUploadByteProgress({ sent: totalBytes, total: totalBytes })
+      setUploadCurrentFileProgress(0)
       setUploadMessage(`${uploadedCount} arquivo(s) enviado(s) para o bucket "${storageBucket}", mantendo a estrutura de pastas.`)
       setUploadMessageTone('success')
       setUploadSuccessOpen(true)
     } catch (error) {
       const message = getUploadErrorMessage(error)
       const normalizedMessage = message.toLowerCase()
-      const details = normalizedMessage.includes('already exists') || normalizedMessage.includes('duplicate')
+      const details = normalizedMessage.includes('invalid key')
+        ? 'O Supabase não aceita acentos ou caracteres Unicode diretamente na chave do Storage. Atualize para a versão mais recente do app; os segmentos incompatíveis são codificados de forma reversível e aparecem com o nome original no explorador.'
+        : normalizedMessage.includes('already exists') || normalizedMessage.includes('duplicate')
         ? `Já existe um objeto com esse nome no Supabase. Nenhum arquivo existente foi substituído. Altere o nome da pasta ou do arquivo e tente novamente.`
         : normalizedMessage.includes('exceeded the maximum allowed size') || normalizedMessage.includes('maximum allowed size')
         ? `O arquivo ultrapassa o limite máximo permitido pelo Supabase para o bucket "${storageBucket}". O envio resumível foi usado, mas ele não remove o limite de tamanho. Aumente o limite em Storage > Buckets > ${storageBucket} (e confira o limite global em Storage > Settings) para um valor acima do tamanho desse arquivo; o máximo também depende do plano Supabase. Depois tente enviar novamente.`
@@ -1219,7 +1227,7 @@ function App() {
     setUploadMessage('')
     setUploadMessageTone('info')
     setUploadProgress({ completed: 0, total: 0 })
-    setUploadByteProgress({ sent: 0, total: 0 })
+    setUploadCurrentFileProgress(0)
     setUploadComplete(false)
   }
 
@@ -1244,10 +1252,7 @@ function App() {
     if (newFiles.length > 0) {
       setUploadComplete(false)
       setUploadProgress({ completed: 0, total: selectedFiles.length + newFiles.length })
-      setUploadByteProgress({
-        sent: 0,
-        total: [...selectedFiles, ...newFiles].reduce((sum, file) => sum + file.size, 0),
-      })
+      setUploadCurrentFileProgress(0)
     }
 
     newFiles
@@ -1857,7 +1862,7 @@ function App() {
                         setUploadMessage('')
                         setUploadMessageTone('info')
                         setUploadProgress({ completed: 0, total: 0 })
-                        setUploadByteProgress({ sent: 0, total: 0 })
+                        setUploadCurrentFileProgress(0)
                         setUploadComplete(false)
                       }}
                       disabled={uploading}
@@ -1933,8 +1938,8 @@ function App() {
                 role="progressbar"
                 aria-label="Progresso da transferência"
                 aria-valuemin={0}
-                aria-valuemax={uploadByteProgress.total || 100}
-                aria-valuenow={uploadByteProgress.sent}
+                aria-valuemax={100}
+                aria-valuenow={uploadPercent}
                 aria-valuetext={`${uploadProgress.completed} de ${uploadProgress.total} arquivos, ${uploadPercent}%`}
               >
                 <div
