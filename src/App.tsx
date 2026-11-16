@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import {
   CheckCircle2,
@@ -17,11 +17,15 @@ import {
   HardDrive,
   LayoutDashboard,
   LogIn,
+  KeyRound,
+  Mail,
   RefreshCw,
   Settings,
   ShieldCheck,
+  Trash2,
   Upload,
   UserRound,
+  UserPlus,
 } from 'lucide-react'
 import './App.css'
 import { Badge } from './components/ui/badge'
@@ -74,8 +78,18 @@ type StorageSnapshot = {
   folders: string[]
 }
 
+type AccessRole = 'master' | 'collaborator'
+
+type ManagedUser = {
+  id: string
+  email: string | null
+  role: AccessRole
+  created_at: string
+}
+
 const emptyStorageSnapshot: StorageSnapshot = { files: [], folders: [] }
 const explorerPageSize = 10
+const masterEmail = 'jose_evilanio@hotmail.com'
 
 function getFilePath(file: File) {
   return file.webkitRelativePath || file.name
@@ -310,6 +324,21 @@ function App() {
   const [authMessage, setAuthMessage] = useState('')
   const [sessionEmail, setSessionEmail] = useState('')
   const [sessionUserId, setSessionUserId] = useState('')
+  const [accessRole, setAccessRole] = useState<AccessRole | null>(null)
+  const [accessError, setAccessError] = useState('')
+  const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([])
+  const [managedUsersLoading, setManagedUsersLoading] = useState(false)
+  const [managementError, setManagementError] = useState('')
+  const [managementMessage, setManagementMessage] = useState('')
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviteSubmitting, setInviteSubmitting] = useState(false)
+  const [inviteSetupRequired, setInviteSetupRequired] = useState(
+    () => new URLSearchParams(window.location.search).get('invite') === 'accepted',
+  )
+  const [invitePassword, setInvitePassword] = useState('')
+  const [invitePasswordConfirm, setInvitePasswordConfirm] = useState('')
+  const [inviteSetupMessage, setInviteSetupMessage] = useState('')
+  const [inviteSetupSubmitting, setInviteSetupSubmitting] = useState(false)
   const [storageSnapshot, setStorageSnapshot] = useState<StorageSnapshot>(emptyStorageSnapshot)
   const [storageLoading, setStorageLoading] = useState(false)
   const [storageError, setStorageError] = useState('')
@@ -318,6 +347,7 @@ function App() {
   const [cachedFilePaths, setCachedFilePaths] = useState<Set<string>>(new Set())
   const [storageRefreshKey, setStorageRefreshKey] = useState(0)
   const [downloadingPath, setDownloadingPath] = useState('')
+  const [deletingPath, setDeletingPath] = useState('')
   const [dialogFile, setDialogFile] = useState<StoredFile | null>(null)
   const [fileDialogText, setFileDialogText] = useState('')
   const [fileDialogPreviewUrl, setFileDialogPreviewUrl] = useState('')
@@ -344,6 +374,7 @@ function App() {
   const refreshPendingRef = useRef(false)
   const loadGenerationRef = useRef(0)
   const fileDialogGenerationRef = useRef(0)
+  const isMaster = accessRole === 'master' || sessionEmail.toLocaleLowerCase() === masterEmail
 
   const triggerStorageRefresh = () => {
     setSyncing(true)
@@ -367,9 +398,26 @@ function App() {
     }, 1200)
   }
 
+  const userEmailById = useMemo(
+    () => new Map(managedUsers.flatMap((user) => user.email ? [[user.id, user.email] as const] : [])),
+    [managedUsers],
+  )
   const filteredFiles = useMemo(() => storageSnapshot.files.filter((file) =>
-    !search || file.path.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
-  ), [search, storageSnapshot.files])
+    !search ||
+    file.path.toLocaleLowerCase().includes(search.toLocaleLowerCase()) ||
+    (isMaster && (userEmailById.get(file.path.split('/')[0]) ?? '')
+      .toLocaleLowerCase()
+      .includes(search.toLocaleLowerCase())),
+  ), [isMaster, search, storageSnapshot.files, userEmailById])
+  const displayStoragePath = (path: string) => {
+    if (!isMaster) {
+      return path
+    }
+
+    const [ownerId, ...remainingPath] = path.split('/')
+    const ownerEmail = userEmailById.get(ownerId)
+    return ownerEmail ? [ownerEmail, ...remainingPath].join('/') : path
+  }
   const folderFilesByPath = useMemo(() => {
     const filesByPath = new Map<string, StoredFile[]>()
 
@@ -425,6 +473,8 @@ function App() {
       setSessionEmail(data.session?.user?.email ?? '')
       setEmail(data.session?.user?.email ?? '')
       setSessionUserId(data.session?.user?.id ?? '')
+      setAccessRole(null)
+      setAccessError('')
       setStorageSnapshot(emptyStorageSnapshot)
       setStorageError('')
       setLastSyncedAt(null)
@@ -436,6 +486,12 @@ function App() {
       setSessionEmail(session?.user?.email ?? '')
       setEmail(session?.user?.email ?? '')
       setSessionUserId(session?.user?.id ?? '')
+      setAccessRole(null)
+      setAccessError('')
+      setManagedUsers([])
+      setManagedUsersLoading(false)
+      setManagementError('')
+      setManagementMessage('')
       setStorageSnapshot(emptyStorageSnapshot)
       setStorageError('')
       setLastSyncedAt(null)
@@ -445,6 +501,81 @@ function App() {
       subscription.subscription.unsubscribe()
     }
   }, [])
+
+  useEffect(() => {
+    const supabaseClient = supabase
+    let cancelled = false
+    if (!supabaseClient || !sessionUserId) {
+      return
+    }
+
+    const loadAccessRole = async () => {
+      try {
+        const { data, error } = await supabaseClient
+          .from('user_profiles')
+          .select('role')
+          .eq('id', sessionUserId)
+          .maybeSingle()
+        if (error) {
+          throw error
+        }
+
+        if (!cancelled) {
+          setAccessRole(data?.role === 'master' ? 'master' : 'collaborator')
+          setAccessError('')
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setAccessRole(null)
+          setAccessError(error instanceof Error ? error.message : 'Não foi possível carregar o nível de acesso.')
+        }
+      }
+    }
+
+    void loadAccessRole()
+    return () => {
+      cancelled = true
+    }
+  }, [sessionUserId])
+
+  useEffect(() => {
+    const supabaseClient = supabase
+    let cancelled = false
+    if (!supabaseClient || !isMaster) {
+      return
+    }
+
+    const loadManagedUsers = async () => {
+      setManagedUsersLoading(true)
+      setManagementError('')
+      try {
+        const { data, error } = await supabaseClient
+          .from('user_profiles')
+          .select('id, email, role, created_at')
+          .order('created_at', { ascending: false })
+        if (error) {
+          throw error
+        }
+        if (!cancelled) {
+          setManagedUsers((data ?? []).filter((user) => user.role === 'master' || user.role === 'collaborator'))
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setManagementError(error instanceof Error ? error.message : 'Não foi possível carregar a lista de usuários.')
+        }
+      } finally {
+        if (!cancelled) {
+          setManagedUsersLoading(false)
+        }
+      }
+    }
+
+    void loadManagedUsers()
+
+    return () => {
+      cancelled = true
+    }
+  }, [isMaster])
 
   useEffect(() => {
     const supabaseClient = supabase
@@ -566,12 +697,17 @@ function App() {
                 continue
               }
 
-              const originalPath = entry.metadata &&
+              const storedOriginalPath = entry.metadata &&
                 typeof entry.metadata === 'object' &&
                 'originalPath' in entry.metadata &&
                 typeof entry.metadata.originalPath === 'string'
                 ? entry.metadata.originalPath
                 : decodedPath
+              const ownerId = relativePath.split('/')[0]
+              const ownerRelativePath = decodeStoragePath(relativePath.split('/').slice(1).join('/'))
+              const originalPath = isMaster
+                ? `${ownerId}/${storedOriginalPath === decodedPath ? ownerRelativePath : storedOriginalPath}`
+                : storedOriginalPath
               const metadataSize = entry.metadata && typeof entry.metadata === 'object' && 'size' in entry.metadata
                 ? entry.metadata.size
                 : 0
@@ -604,7 +740,7 @@ function App() {
           }
         }
 
-        await readFolder(sessionUserId, '')
+        await readFolder(isMaster ? '' : sessionUserId, '')
         for (const file of files) {
           const segments = file.path.split('/')
           segments.slice(0, -1).forEach((_segment, index) => {
@@ -663,7 +799,95 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [sessionUserId, storageRefreshKey])
+  }, [isMaster, sessionUserId, storageRefreshKey])
+
+  const inviteCollaborator = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!supabase || !isMaster) {
+      setManagementError('Somente a conta Master pode convidar colaboradores.')
+      return
+    }
+
+    setInviteSubmitting(true)
+    setManagementError('')
+    setManagementMessage('')
+
+    try {
+      const { data, error } = await supabase.functions.invoke<{ user: ManagedUser }>('manage-users', {
+        body: {
+          email: inviteEmail.trim(),
+          redirectTo: `${window.location.origin}/?invite=accepted`,
+        },
+      })
+
+      if (error) {
+        const context = error.context
+        if (context instanceof Response) {
+          const responseBody: unknown = await context.clone().json().catch(() => null)
+          if (
+            typeof responseBody === 'object' &&
+            responseBody !== null &&
+            'error' in responseBody &&
+            typeof responseBody.error === 'string'
+          ) {
+            throw new Error(responseBody.error)
+          }
+        }
+        throw error
+      }
+
+      if (!data?.user) {
+        throw new Error('O Supabase não confirmou o cadastro do colaborador.')
+      }
+
+      setManagedUsers((current) => [
+        data.user,
+        ...current.filter((user) => user.id !== data.user.id),
+      ])
+      setInviteEmail('')
+      setManagementMessage(`Convite enviado para ${data.user.email ?? 'o endereço informado'}.`)
+    } catch (error) {
+      setManagementError(error instanceof Error ? error.message : 'Não foi possível enviar o convite.')
+    } finally {
+      setInviteSubmitting(false)
+    }
+  }
+
+  const handleInvitePasswordSetup = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!supabase || !sessionUserId) {
+      setInviteSetupMessage('Abra o link recebido por e-mail para continuar.')
+      return
+    }
+    if (invitePassword.length < 8) {
+      setInviteSetupMessage('A senha deve ter pelo menos 8 caracteres.')
+      return
+    }
+    if (invitePassword !== invitePasswordConfirm) {
+      setInviteSetupMessage('As senhas informadas não coincidem.')
+      return
+    }
+
+    setInviteSetupSubmitting(true)
+    setInviteSetupMessage('')
+    try {
+      const { error } = await supabase.auth.updateUser({ password: invitePassword })
+      if (error) {
+        throw error
+      }
+
+      setInviteSetupRequired(false)
+      setInvitePassword('')
+      setInvitePasswordConfirm('')
+      setInviteSetupMessage('')
+      window.history.replaceState({}, document.title, window.location.pathname)
+      setAuthMessage('Senha definida. Sua conta de colaborador está pronta para uso.')
+    } catch (error) {
+      setInviteSetupMessage(error instanceof Error ? error.message : 'Não foi possível definir a senha.')
+    } finally {
+      setInviteSetupSubmitting(false)
+    }
+  }
 
   const handleAuth = async () => {
     if (!supabase) {
@@ -730,6 +954,60 @@ function App() {
       setCacheMessage('Cache local removido deste navegador.')
     } catch (error) {
       setCacheMessage(`Não foi possível limpar o cache local: ${error instanceof Error ? error.message : 'erro desconhecido.'}`)
+    }
+  }
+
+  const deleteStoredFiles = async (files: StoredFile[], label: string) => {
+    if (!supabase || !sessionUserId || files.length === 0 || deletingPath) {
+      return
+    }
+    if (uploadInProgressRef.current) {
+      setStorageActionMessage('Aguarde a transferência atual terminar antes de excluir arquivos.')
+      return
+    }
+
+    const uniqueFiles = [...new Map(files.map((file) => [file.objectPath, file])).values()]
+    if (!window.confirm(`Excluir ${uniqueFiles.length} arquivo(s) de ${label} permanentemente do Storage? Esta ação não pode ser desfeita.`)) {
+      return
+    }
+
+    setDeletingPath(label)
+    setStorageActionMessage('')
+    uploadInProgressRef.current = true
+    try {
+      const storage = supabase.storage.from(storageBucket)
+      const objectPaths = uniqueFiles.map((file) => file.objectPath)
+      for (let index = 0; index < objectPaths.length; index += 100) {
+        const { error } = await storage.remove(objectPaths.slice(index, index + 100))
+        if (error) {
+          throw error
+        }
+      }
+
+      setCachedFilePaths((paths) => {
+        const next = new Set(paths)
+        objectPaths.forEach((path) => next.delete(path))
+        return next
+      })
+      const cacheResults = await Promise.allSettled(
+        objectPaths.map((objectPath) => deleteCachedFile(sessionUserId, storageBucket, objectPath)),
+      )
+      const failedCacheDeletes = cacheResults.filter((result) => result.status === 'rejected').length
+      setStorageActionMessage(`${uniqueFiles.length} arquivo(s) removido(s) do Storage.`)
+      if (failedCacheDeletes > 0) {
+        setCacheMessage(`Não foi possível remover ${failedCacheDeletes} cópia(s) do cache local; a próxima sincronização tentará corrigir o catálogo.`)
+      }
+      triggerStorageRefresh()
+    } catch (error) {
+      setStorageActionMessage(error instanceof Error ? `Não foi possível concluir a exclusão: ${error.message}` : 'Não foi possível concluir a exclusão.')
+      triggerStorageRefresh()
+    } finally {
+      uploadInProgressRef.current = false
+      setDeletingPath('')
+      if (refreshPendingRef.current) {
+        refreshPendingRef.current = false
+        triggerStorageRefresh()
+      }
     }
   }
 
@@ -855,6 +1133,10 @@ function App() {
       setFileDialogError('Configure o Supabase antes de atualizar arquivos.')
       return false
     }
+    if (deletingPath) {
+      setFileDialogError('Aguarde a exclusão atual terminar antes de atualizar este arquivo.')
+      return false
+    }
     if (uploadInProgressRef.current) {
       setFileDialogError('Aguarde a transferência atual terminar antes de atualizar este arquivo.')
       return false
@@ -874,15 +1156,16 @@ function App() {
       if (!session || session.user.id !== sessionUserId) {
         throw new Error('Faça login novamente para atualizar este arquivo.')
       }
-      if (!file.objectPath.startsWith(`${session.user.id}/`)) {
+      if (!isMaster && !file.objectPath.startsWith(`${session.user.id}/`)) {
         throw new Error('O arquivo não pertence à conta autenticada.')
       }
 
+      const originalPath = isMaster ? file.path.split('/').slice(1).join('/') : file.path
       if (replacement.size > 6 * 1024 * 1024) {
         await uploadLargeFile(
           replacement,
           file.objectPath,
-          file.path,
+          originalPath,
           session.user.id,
           session.access_token,
           true,
@@ -893,7 +1176,7 @@ function App() {
           cacheControl: '3600',
           upsert: true,
           contentType: replacement.type || file.contentType || 'application/octet-stream',
-          metadata: { originalPath: file.path },
+          metadata: { originalPath },
         })
         if (error) {
           throw error
@@ -943,6 +1226,11 @@ function App() {
   const handleUpload = async () => {
     if (!supabase || selectedFiles.length === 0) {
       setUploadMessage('Selecione um ou mais arquivos, ou uma pasta, antes de enviar.')
+      setUploadMessageTone('error')
+      return
+    }
+    if (deletingPath) {
+      setUploadMessage('Aguarde a exclusão atual terminar antes de iniciar outro envio.')
       setUploadMessageTone('error')
       return
     }
@@ -1501,6 +1789,9 @@ function App() {
       <div className="folder-dropdown-list">
         {explorerFolders.map((folder) => {
           const folderFiles = folderFilesByPath.get(folder) ?? []
+          const folderFilesForDeletion = folder
+            ? storageSnapshot.files.filter((file) => file.path.startsWith(`${folder}/`))
+            : []
           const folderPageCount = Math.max(1, Math.ceil(folderFiles.length / explorerPageSize))
           const currentFolderPage = Math.min(folderPages[folder] ?? 1, folderPageCount)
           const folderPageFiles = folderFiles.slice(
@@ -1531,11 +1822,28 @@ function App() {
             >
               <summary>
                 <FolderOpen size={17} aria-hidden="true" />
-                <span className="folder-dropdown-name">{folder || 'Arquivos na raiz'}</span>
+                <span className="folder-dropdown-name">{folder ? displayStoragePath(folder) : 'Arquivos na raiz'}</span>
                 <span className="badge neutral">{folderFiles.length} arquivo(s)</span>
                 <ChevronDown className="folder-dropdown-chevron" size={16} aria-hidden="true" />
               </summary>
               <div className="folder-dropdown-content">
+                {folderFilesForDeletion.length > 0 && (
+                  <div className="folder-actions">
+                    <span className="muted">
+                      {folderFilesForDeletion.length} arquivo(s) nesta pasta e em suas subpastas.
+                    </span>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => void deleteStoredFiles(folderFilesForDeletion, `a pasta "${displayStoragePath(folder)}"`)}
+                      disabled={Boolean(deletingPath)}
+                    >
+                      <Trash2 size={14} aria-hidden="true" />
+                      {deletingPath === `a pasta "${displayStoragePath(folder)}"` ? 'Excluindo...' : 'Excluir pasta'}
+                    </Button>
+                  </div>
+                )}
                 <div className="table-wrap">
                   <table>
                     <thead>
@@ -1554,7 +1862,7 @@ function App() {
                         return (
                           <tr key={file.objectPath}>
                             <td>
-                              <div className="storage-file-cell" title={file.path}>
+                              <div className="storage-file-cell" title={displayStoragePath(file.path)}>
                                 <span className="storage-file-icon" aria-hidden="true">
                                   <FileTypeIcon size={18} strokeWidth={1.7} />
                                 </span>
@@ -1562,7 +1870,7 @@ function App() {
                                   type="button"
                                   className="storage-file-name file-open-button"
                                   onClick={() => void openStoredFile(file)}
-                                  aria-label={`Abrir ${file.path}`}
+                                  aria-label={`Abrir ${displayStoragePath(file.path)}`}
                                 >
                                   {file.name}
                                 </button>
@@ -1573,21 +1881,34 @@ function App() {
                             <td>{formatFileSize(file.size)}</td>
                             <td>{formatModifiedDate(file.updatedAt)}</td>
                             <td>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                onClick={() => void downloadStoredFile(file)}
-                                disabled={downloadingPath === file.objectPath}
-                                aria-label={`Baixar ${file.path}`}
-                              >
-                                <Download size={14} aria-hidden="true" />
-                                {downloadingPath === file.objectPath
-                                  ? 'Preparando...'
-                                  : cachedFilePaths.has(file.objectPath)
-                                    ? 'Baixar (local)'
-                                    : 'Baixar'}
-                              </Button>
+                              <div className="file-action-buttons">
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => void downloadStoredFile(file)}
+                                  disabled={downloadingPath === file.objectPath || Boolean(deletingPath)}
+                                  aria-label={`Baixar ${displayStoragePath(file.path)}`}
+                                >
+                                  <Download size={14} aria-hidden="true" />
+                                  {downloadingPath === file.objectPath
+                                    ? 'Preparando...'
+                                    : cachedFilePaths.has(file.objectPath)
+                                      ? 'Baixar (local)'
+                                      : 'Baixar'}
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="destructive"
+                                  size="sm"
+                                  onClick={() => void deleteStoredFiles([file], `o arquivo "${displayStoragePath(file.path)}"`)}
+                                  disabled={Boolean(deletingPath)}
+                                  aria-label={`Excluir ${displayStoragePath(file.path)}`}
+                                >
+                                  <Trash2 size={14} aria-hidden="true" />
+                                  Excluir
+                                </Button>
+                              </div>
                             </td>
                           </tr>
                         )
@@ -1669,13 +1990,77 @@ function App() {
           </thead>
           <tbody>
             <tr><td>Usuário autenticado</td><td>{sessionEmail || 'Nenhum'}</td></tr>
+            <tr><td>Nível de acesso</td><td>{isMaster ? 'Master' : accessRole === 'collaborator' ? 'Colaborador' : 'Verificando…'}</td></tr>
             <tr><td>Bucket</td><td>{storageBucket}</td></tr>
             <tr><td>Objetos acessíveis nesta sessão</td><td>{storageError ? 'Falha ao consultar' : storageLoading ? 'Consultando...' : storageSnapshot.files.length.toLocaleString('pt-BR')}</td></tr>
-            <tr><td>Controle de acesso</td><td>Supabase Auth e RLS configurada no projeto</td></tr>
+            <tr><td>Escopo</td><td>{isMaster ? 'Todos os arquivos e pastas do bucket' : 'Somente os arquivos e pastas desta conta'}</td></tr>
           </tbody>
         </table>
       </div>
-      <p className="muted mt">Perfis, empresas e permissões individuais não são exibidos porque não há uma tabela de autorização corporativa conectada neste projeto.</p>
+      {accessError && <p className="status-message" role="alert">Não foi possível carregar o perfil: {accessError}</p>}
+      <p className="muted mt">
+        O Supabase aplica o isolamento no banco e no Storage: colaboradores acessam somente o próprio prefixo; a conta Master pode administrar todos os objetos.
+      </p>
+
+      {isMaster && (
+        <section className="user-management">
+          <div className="panel-header">
+            <div>
+              <h3>Usuários e convites</h3>
+              <p className="muted">Novas contas recebem automaticamente o nível Colaborador.</p>
+            </div>
+            <span className="badge neutral">
+              {managedUsersLoading ? 'Carregando...' : `${managedUsers.length} usuário(s)`}
+            </span>
+          </div>
+
+          <form className="user-invite-form" onSubmit={(event) => void inviteCollaborator(event)}>
+            <label className="user-invite-field">
+              <span><Mail size={14} aria-hidden="true" /> E-mail do colaborador</span>
+              <Input
+                type="email"
+                required
+                autoComplete="email"
+                placeholder="nome@empresa.com"
+                value={inviteEmail}
+                onChange={(event) => setInviteEmail(event.target.value)}
+                disabled={inviteSubmitting}
+              />
+            </label>
+            <Button type="submit" disabled={!inviteEmail.trim() || inviteSubmitting}>
+              <UserPlus size={15} aria-hidden="true" />
+              {inviteSubmitting ? 'Enviando convite...' : 'Convidar colaborador'}
+            </Button>
+          </form>
+
+          {managementError && <p className="status-message error" role="alert">{managementError}</p>}
+          {managementMessage && <p className="status-message success" role="status">{managementMessage}</p>}
+
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Usuário</th>
+                  <th>Nível</th>
+                  <th>Adicionado em</th>
+                </tr>
+              </thead>
+              <tbody>
+                {managedUsers.map((user) => (
+                  <tr key={user.id}>
+                    <td>{user.email || 'E-mail não informado'}</td>
+                    <td>{user.role === 'master' ? 'Master' : 'Colaborador'}</td>
+                    <td>{formatModifiedDate(user.created_at)}</td>
+                  </tr>
+                ))}
+                {!managedUsersLoading && managedUsers.length === 0 && (
+                  <tr><td colSpan={3}>{managementError ? 'Não foi possível carregar os usuários.' : 'Nenhum usuário cadastrado.'}</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
     </section>
   )
 
@@ -1898,7 +2283,7 @@ function App() {
                 <strong>{storageBucket}</strong>
               </div>
 
-              <Button type="button" size="sm" onClick={handleUpload} disabled={!supabase || selectedFiles.length === 0 || uploading || fileDialogSaving}>
+              <Button type="button" size="sm" onClick={handleUpload} disabled={!supabase || selectedFiles.length === 0 || uploading || fileDialogSaving || Boolean(deletingPath)}>
                 <Upload size={14} aria-hidden="true" />
                 {uploading ? 'Enviando...' : !supabase ? 'Supabase não configurado' : `Enviar ${selectedFiles.length || ''} arquivo(s)`}
               </Button>
@@ -2023,6 +2408,57 @@ function App() {
             <div className="upload-success-actions">
               <Button type="button" onClick={acknowledgeUploadSuccess}>OK</Button>
             </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+      <Dialog.Root open={inviteSetupRequired && Boolean(sessionUserId)}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="login-overlay" />
+          <Dialog.Content
+            className="login-dialog"
+            onEscapeKeyDown={(event) => event.preventDefault()}
+            onPointerDownOutside={(event) => event.preventDefault()}
+          >
+            <div className="login-dialog-header">
+              <div className="login-dialog-icon"><KeyRound size={18} aria-hidden="true" /></div>
+              <div>
+                <Dialog.Title className="login-dialog-title">Defina sua senha</Dialog.Title>
+                <Dialog.Description className="login-dialog-description">
+                  Convite aceito para {sessionEmail}. Crie uma senha para acessar seus arquivos.
+                </Dialog.Description>
+              </div>
+            </div>
+            <form className="login-form" onSubmit={(event) => void handleInvitePasswordSetup(event)}>
+              <label>
+                Nova senha
+                <Input
+                  type="password"
+                  autoComplete="new-password"
+                  minLength={8}
+                  required
+                  value={invitePassword}
+                  onChange={(event) => setInvitePassword(event.target.value)}
+                  disabled={inviteSetupSubmitting}
+                />
+              </label>
+              <label>
+                Confirmar senha
+                <Input
+                  type="password"
+                  autoComplete="new-password"
+                  minLength={8}
+                  required
+                  value={invitePasswordConfirm}
+                  onChange={(event) => setInvitePasswordConfirm(event.target.value)}
+                  disabled={inviteSetupSubmitting}
+                />
+              </label>
+              {inviteSetupMessage && <p className="status-message error" role="alert">{inviteSetupMessage}</p>}
+              <Button type="submit" disabled={inviteSetupSubmitting}>
+                <KeyRound size={15} aria-hidden="true" />
+                {inviteSetupSubmitting ? 'Salvando senha...' : 'Salvar senha'}
+              </Button>
+            </form>
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

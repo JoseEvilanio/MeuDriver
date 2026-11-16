@@ -778,6 +778,24 @@ input:focus-visible {
   padding: 0 12px 12px;
 }
 
+.folder-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.folder-actions .muted {
+  margin: 0;
+}
+
+.file-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .file-pagination {
   display: flex;
   align-items: center;
@@ -915,6 +933,58 @@ tbody td:first-child {
 
 .settings-list {
   display: grid;
+}
+
+.user-management {
+  display: grid;
+  gap: 14px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.user-management .panel-header {
+  align-items: flex-start;
+}
+
+.user-management .panel-header h3 {
+  margin: 0;
+  font-size: 0.96rem;
+  font-weight: 600;
+}
+
+.user-management .panel-header .muted {
+  margin-bottom: 0;
+}
+
+.user-invite-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.user-invite-field {
+  display: grid;
+  flex: 1;
+  gap: 6px;
+  min-width: 0;
+  color: var(--foreground);
+  font-size: 0.8rem;
+  font-weight: 550;
+}
+
+.user-invite-field > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-message.error {
+  color: var(--destructive);
+}
+
+.status-message.success {
+  color: var(--success);
 }
 
 .setting-row {
@@ -1663,5 +1733,19 @@ tbody td:first-child {
   .panel,
   .ui-card {
     padding: 15px;
+  }
+
+  .user-invite-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .user-invite-form .ui-button {
+    width: 100%;
+  }
+
+  .folder-actions {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
