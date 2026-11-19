@@ -1,5 +1,7 @@
 # Auditoria tecnica e plano de migracao AWS
 
+> Atualizacao: esta auditoria descreve o estado anterior a remocao do Cloudflare R2 do frontend. O app agora usa exclusivamente Supabase Storage; os objetos e recursos remotos existentes, a migration de catalogo e a Edge Function foram preservados sem alteracao. As observacoes abaixo sobre R2 sao historicas e nao representam o comportamento atual do app.
+
 ## Estado atual
 
 - Front-end web: React 19, TypeScript, Vite 8 e componentes Radix UI.

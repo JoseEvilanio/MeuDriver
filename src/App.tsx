@@ -46,13 +46,6 @@ import {
 } from './lib/local-cache'
 import { appUrl, storageBucket, supabase, supabaseAnonKey, supabaseUrl } from './lib/supabase'
 import { FileDialog, type PreviewKind } from './components/file-dialog'
-import {
-  deleteR2File,
-  getR2DownloadUrl,
-  listR2Files,
-  updateR2FilePath,
-  uploadR2File,
-} from './lib/r2-storage'
 
 const TransferAnimation = lazy(async () => {
   const module = await import('./components/transfer-animation')
@@ -79,8 +72,6 @@ type StoredFile = {
   size: number
   updatedAt: string | null
   contentType: string
-  provider: 'supabase' | 'cloudflare_r2'
-  fileId?: string
 }
 
 type StorageSnapshot = {
@@ -100,6 +91,18 @@ type ManagedUser = {
 const emptyStorageSnapshot: StorageSnapshot = { files: [], folders: [] }
 const explorerPageSize = 10
 const masterEmail = 'jose_evilanio@hotmail.com'
+
+function getCachedSupabaseSnapshot(snapshot: StorageSnapshot): StorageSnapshot {
+  const files = snapshot.files.filter((file) => !('provider' in file) || file.provider === 'supabase')
+  const folders = new Set<string>()
+  for (const file of files) {
+    const segments = file.path.split('/')
+    segments.slice(0, -1).forEach((_segment, index) => {
+      folders.add(segments.slice(0, index + 1).join('/'))
+    })
+  }
+  return { files, folders: [...folders].sort((left, right) => left.localeCompare(right)) }
+}
 
 function getFilePath(file: File) {
   return file.webkitRelativePath || file.name
@@ -167,13 +170,15 @@ function getResumableEndpoint(baseUrl: string) {
   return `${parsedUrl.protocol}//${hostname}/storage/v1/upload/resumable`
 }
 
-async function uploadLegacyLargeFile(
+async function uploadSupabaseResumableFile(
   file: File,
   objectPath: string,
   originalPath: string,
   userId: string,
   accessToken: string,
   onProgress: (sent: number, total: number) => void,
+  signal: AbortSignal,
+  upsert: boolean,
 ) {
   if (!supabaseUrl || !supabaseAnonKey) {
     throw new Error('As configurações do Supabase não estão disponíveis.')
@@ -186,7 +191,7 @@ async function uploadLegacyLargeFile(
     headers: {
       apikey: supabaseAnonKey,
       authorization: `Bearer ${accessToken}`,
-      'x-upsert': 'true',
+      'x-upsert': String(upsert),
     },
     uploadDataDuringCreation: true,
     removeFingerprintOnSuccess: true,
@@ -204,11 +209,32 @@ async function uploadLegacyLargeFile(
 
   const previousUploads = await upload.findPreviousUploads()
   return new Promise<void>((resolve, reject) => {
+    let settled = false
+    const finish = (callback: () => void) => {
+      if (settled) {
+        return
+      }
+      settled = true
+      signal.removeEventListener('abort', abort)
+      callback()
+    }
+    const abort = () => {
+      void upload.abort(false).then(
+        () => finish(() => reject(new DOMException('Upload pausado.', 'AbortError'))),
+        (error: unknown) => finish(() => reject(error)),
+      )
+    }
+
     if (previousUploads.length > 0) {
       upload.resumeFromPreviousUpload(previousUploads[previousUploads.length - 1])
     }
-    upload.options.onError = reject
-    upload.options.onSuccess = () => resolve()
+    upload.options.onError = (error) => finish(() => reject(error))
+    upload.options.onSuccess = () => finish(resolve)
+    if (signal.aborted) {
+      finish(() => reject(new DOMException('Upload pausado.', 'AbortError')))
+      return
+    }
+    signal.addEventListener('abort', abort, { once: true })
     upload.start()
   })
 }
@@ -687,21 +713,6 @@ function App() {
           triggerStorageRefresh()
         },
       )
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'drive_files',
-        },
-        () => {
-          if (uploadInProgressRef.current) {
-            refreshPendingRef.current = true
-            return
-          }
-          triggerStorageRefresh()
-        },
-      )
       .subscribe()
 
     return () => {
@@ -742,11 +753,17 @@ function App() {
         ])
 
         if (!cancelled) {
-          if (cachedCatalog) {
-            setStorageSnapshot(cachedCatalog.snapshot)
+          const cachedSnapshot = cachedCatalog
+            ? getCachedSupabaseSnapshot(cachedCatalog.snapshot)
+            : null
+          if (cachedCatalog && cachedSnapshot) {
+            setStorageSnapshot(cachedSnapshot)
             setLastSyncedAt(cachedCatalog.savedAt)
           }
-          setCachedFilePaths(new Set(cachedFiles.map((cachedFile) => cachedFile.objectPath)))
+          const cachedObjectPaths = new Set(cachedSnapshot?.files.map((file) => file.objectPath) ?? [])
+          setCachedFilePaths(new Set(cachedFiles
+            .filter((cachedFile) => cachedObjectPaths.has(cachedFile.objectPath))
+            .map((cachedFile) => cachedFile.objectPath)))
         }
       } catch (error) {
         if (!cancelled) {
@@ -828,7 +845,6 @@ function App() {
                 size,
                 updatedAt: entry.updated_at ?? entry.created_at ?? null,
                 contentType,
-                provider: 'supabase',
               })
             }
 
@@ -839,38 +855,13 @@ function App() {
           }
         }
 
-        let legacyStorageWarning = ''
+        let storageWarning = ''
         try {
           await readFolder(canAccessAllFiles ? '' : sessionUserId, '')
         } catch (error) {
-          legacyStorageWarning = error instanceof Error
-            ? `Não foi possível consultar os objetos legados do Supabase Storage: ${error.message}`
-            : 'Não foi possível consultar os objetos legados do Supabase Storage.'
-        }
-        let r2Files: Awaited<ReturnType<typeof listR2Files>> = []
-        let r2CatalogWarning = ''
-        try {
-          r2Files = await listR2Files()
-        } catch (error) {
-          r2CatalogWarning = error instanceof Error
-            ? `O catálogo R2 não está disponível: ${error.message}`
-            : 'O catálogo R2 não está disponível.'
-        }
-        for (const file of r2Files) {
-          const relativePath = file.original_path
-          const displayedPath = canAccessAllFiles
-            ? `${file.user_id}/${relativePath}`
-            : relativePath
-          files.push({
-            name: file.original_name,
-            path: displayedPath,
-            objectPath: file.storage_key,
-            size: Number(file.file_size),
-            updatedAt: file.updated_at,
-            contentType: file.mime_type,
-            provider: 'cloudflare_r2',
-            fileId: file.id,
-          })
+          storageWarning = error instanceof Error
+            ? `Não foi possível consultar os objetos do Supabase Storage: ${error.message}`
+            : 'Não foi possível consultar os objetos do Supabase Storage.'
         }
         for (const file of files) {
           const segments = file.path.split('/')
@@ -884,7 +875,7 @@ function App() {
           const snapshot = { files, folders: [...folders].sort((left, right) => left.localeCompare(right)) }
           setStorageSnapshot(snapshot)
           setLastSyncedAt(Date.now())
-          setStorageActionMessage([legacyStorageWarning, r2CatalogWarning].filter(Boolean).join(' '))
+          setStorageActionMessage(storageWarning)
         }
 
         const snapshot = { files, folders: [...folders].sort((left, right) => left.localeCompare(right)) }
@@ -1137,28 +1128,21 @@ function App() {
     setPathEditSaving(true)
     setPathEditError('')
     try {
-      if (pathEditFile.provider === 'cloudflare_r2') {
-        if (!pathEditFile.fileId) {
-          throw new Error('O registro R2 não contém um identificador.')
-        }
-        await updateR2FilePath(pathEditFile.fileId, requestedPath)
-      } else {
-        if (!supabase) {
-          throw new Error('Configure o Supabase para mover arquivos legados.')
-        }
-        const ownerId = pathEditFile.objectPath.split('/')[0]
-        const destinationPath = `${ownerId}/${getStoragePath(requestedPath)}`
-        const { error } = await supabase.storage
-          .from(storageBucket)
-          .move(pathEditFile.objectPath, destinationPath)
-        if (error) {
-          throw error
-        }
-        try {
-          await deleteCachedFile(sessionUserId, storageBucket, pathEditFile.objectPath)
-        } catch (error) {
-          setCacheMessage(`O arquivo foi movido, mas não foi possível invalidar a cópia local: ${error instanceof Error ? error.message : 'erro desconhecido.'}`)
-        }
+      if (!supabase) {
+        throw new Error('Configure o Supabase para mover arquivos.')
+      }
+      const ownerId = pathEditFile.objectPath.split('/')[0]
+      const destinationPath = `${ownerId}/${getStoragePath(requestedPath)}`
+      const { error } = await supabase.storage
+        .from(storageBucket)
+        .move(pathEditFile.objectPath, destinationPath)
+      if (error) {
+        throw error
+      }
+      try {
+        await deleteCachedFile(sessionUserId, storageBucket, pathEditFile.objectPath)
+      } catch (error) {
+        setCacheMessage(`O arquivo foi movido, mas não foi possível invalidar a cópia local: ${error instanceof Error ? error.message : 'erro desconhecido.'}`)
       }
       setPathEditFile(null)
       triggerStorageRefresh()
@@ -1206,18 +1190,9 @@ function App() {
     uploadInProgressRef.current = true
     try {
       const objectPaths = uniqueFiles.map((file) => file.objectPath)
-      const r2Files = uniqueFiles.filter((file) => file.provider === 'cloudflare_r2')
-      const legacyFiles = uniqueFiles.filter((file) => file.provider === 'supabase')
-      for (const file of r2Files) {
-        if (!file.fileId) {
-          throw new Error(`O registro de "${file.name}" não contém o identificador necessário para excluí-lo do R2.`)
-        }
-        await deleteR2File(file.fileId)
-      }
       const storage = supabase.storage.from(storageBucket)
-      const legacyPaths = legacyFiles.map((file) => file.objectPath)
-      for (let index = 0; index < legacyPaths.length; index += 100) {
-        const { error } = await storage.remove(legacyPaths.slice(index, index + 100))
+      for (let index = 0; index < objectPaths.length; index += 100) {
+        const { error } = await storage.remove(objectPaths.slice(index, index + 100))
         if (error) {
           throw error
         }
@@ -1271,23 +1246,9 @@ function App() {
     }
 
     try {
-      let data: Blob
-      if (file.provider === 'cloudflare_r2') {
-        if (!file.fileId) {
-          throw new Error('O registro do arquivo R2 não contém um identificador.')
-        }
-        const url = await getR2DownloadUrl(file.fileId, true)
-        const response = await fetch(url)
-        if (!response.ok) {
-          throw new Error(`O R2 não conseguiu baixar o arquivo (HTTP ${response.status}).`)
-        }
-        data = await response.blob()
-      } else {
-        const { data: downloaded, error } = await supabase.storage.from(storageBucket).download(file.objectPath)
-        if (error) {
-          throw error
-        }
-        data = downloaded
+      const { data, error } = await supabase.storage.from(storageBucket).download(file.objectPath)
+      if (error) {
+        throw error
       }
 
       try {
@@ -1319,21 +1280,6 @@ function App() {
     setDownloadingPath(file.objectPath)
     setStorageActionMessage('')
     try {
-      if (file.provider === 'cloudflare_r2') {
-        if (!file.fileId) {
-          throw new Error('O registro do arquivo R2 não contém um identificador.')
-        }
-        const url = await getR2DownloadUrl(file.fileId)
-        const link = document.createElement('a')
-        link.href = url
-        link.download = file.name
-        link.rel = 'noopener'
-        document.body.appendChild(link)
-        link.click()
-        link.remove()
-        return
-      }
-
       const fileBlob = await getStoredFileBlob(file)
       const downloadUrl = URL.createObjectURL(fileBlob)
       const link = document.createElement('a')
@@ -1374,26 +1320,15 @@ function App() {
     setDownloadingPath(file.objectPath)
 
     try {
-      if (file.provider === 'cloudflare_r2' && !editable) {
-        if (!file.fileId) {
-          throw new Error('O registro do arquivo R2 não contém um identificador.')
-        }
-        const url = await getR2DownloadUrl(file.fileId, true)
-        if (fileDialogGenerationRef.current !== generation) {
-          return
-        }
-        setFileDialogPreviewUrl(url)
-      } else {
-        const blob = await getStoredFileBlob(file)
-        if (fileDialogGenerationRef.current !== generation) {
-          return
-        }
+      const blob = await getStoredFileBlob(file)
+      if (fileDialogGenerationRef.current !== generation) {
+        return
+      }
 
-        if (editable) {
-          setFileDialogText(await blob.text())
-        } else {
-          setFileDialogPreviewUrl(URL.createObjectURL(blob))
-        }
+      if (editable) {
+        setFileDialogText(await blob.text())
+      } else {
+        setFileDialogPreviewUrl(URL.createObjectURL(blob))
       }
     } catch (error) {
       if (fileDialogGenerationRef.current === generation) {
@@ -1436,32 +1371,20 @@ function App() {
         throw new Error('Faça login novamente para atualizar este arquivo.')
       }
       if (!canAccessAllFiles && !file.objectPath.startsWith(`${session.user.id}/`)) {
-        if (file.provider !== 'cloudflare_r2' || !file.fileId) {
-          throw new Error('O arquivo não pertence à conta autenticada.')
-        }
+        throw new Error('O arquivo não pertence à conta autenticada.')
       }
 
       const originalPath = canAccessAllFiles ? file.path.split('/').slice(1).join('/') : file.path
-      if (file.provider === 'cloudflare_r2') {
-        if (!file.fileId) {
-          throw new Error('O registro do arquivo R2 não contém um identificador.')
-        }
-        await uploadR2File(
-          replacement,
-          originalPath,
-          session.user.id,
-          () => undefined,
-          new AbortController().signal,
-          file.fileId,
-        )
-      } else if (replacement.size > 6 * 1024 * 1024) {
-        await uploadLegacyLargeFile(
+      if (replacement.size > 6 * 1024 * 1024) {
+        await uploadSupabaseResumableFile(
           replacement,
           file.objectPath,
           originalPath,
           session.user.id,
           session.access_token,
           () => undefined,
+          new AbortController().signal,
+          true,
         )
       } else {
         const { error } = await supabase.storage.from(storageBucket).upload(file.objectPath, replacement, {
@@ -1563,7 +1486,7 @@ function App() {
 
       const userId = sessionData.session.user.id
       setSessionEmail(sessionData.session.user.email ?? '')
-      progressKey = `meudrive:upload:${userId}:${getUploadJobId(selectedFiles)}`
+      progressKey = `meudrive:upload:${userId}:supabase:${getUploadJobId(selectedFiles)}`
       const savedProgress = localStorage.getItem(progressKey)
       if (savedProgress) {
         const parsedProgress: unknown = JSON.parse(savedProgress)
@@ -1579,10 +1502,10 @@ function App() {
       }
 
       currentPath = 'verificação de nomes'
-      setUploadMessage('Verificando conflitos em arquivos legados e no catálogo do R2...')
+      setUploadMessage('Verificando conflitos no Supabase Storage...')
       const storage = supabase.storage.from(storageBucket)
       const pageSize = 1000
-      let legacyConflictCheckWarning = ''
+      let storageConflictCheckWarning = ''
       const readStoragePage = async (storageFolder: string, offset: number) => {
         let entries: Awaited<ReturnType<typeof storage.list>>['data'] = null
         let lastError: unknown = null
@@ -1606,7 +1529,7 @@ function App() {
         }
 
         if (entries === null) {
-          legacyConflictCheckWarning = `Não foi possível validar conflitos dos objetos legados do Supabase Storage (${lastError instanceof Error ? lastError.message : 'erro desconhecido'}); o backend ainda valida conflitos no catálogo R2.`
+          storageConflictCheckWarning = `Não foi possível validar conflitos no Supabase Storage (${lastError instanceof Error ? lastError.message : 'erro desconhecido'}); a verificação de nomes pode estar incompleta.`
           return []
         }
         return entries
@@ -1708,7 +1631,7 @@ function App() {
         const moreNames = conflicts.size > 5 ? ` e mais ${conflicts.size - 5}` : ''
         const messages: string[] = []
         if (conflicts.size > 0) {
-          messages.push(`Já existe uma pasta ou arquivo com o nome "${names}"${moreNames} no Supabase.`)
+          messages.push(`Já existe uma pasta ou arquivo com o nome "${names}"${moreNames} em um dos armazenamentos.`)
         }
         if (repeatedPaths.size > 0) {
           messages.push(`O lote selecionado contém ${repeatedPaths.size} caminho(s) duplicado(s).`)
@@ -1737,26 +1660,44 @@ function App() {
         setUploadMessage(`Enviando ${uploadedCount + 1} de ${selectedFiles.length}: ${currentPath}`)
         setUploadMessageTone('info')
 
-        await uploadR2File(
-          file,
-          currentPath,
-          userId,
-          ({ sentBytes, totalBytes }) => {
-            setUploadCurrentFileProgress(totalBytes > 0 ? Math.min(sentBytes / totalBytes, 1) : 1)
-            const overallSent = completedBytes + sentBytes
-            const now = Date.now()
-            const elapsedSeconds = Math.max((now - lastProgressAt) / 1000, 0.001)
-            const speed = Math.max(0, (overallSent - lastProgressBytes) / elapsedSeconds)
-            lastProgressAt = now
-            lastProgressBytes = overallSent
-            setUploadBytes({
-              sent: overallSent,
-              total: selectedFiles.reduce((sum, selected) => sum + selected.size, 0),
-              speed,
-            })
-          },
-          abortController.signal,
-        )
+        const reportProgress = (sentBytes: number, totalBytes: number) => {
+          setUploadCurrentFileProgress(totalBytes > 0 ? Math.min(sentBytes / totalBytes, 1) : 1)
+          const overallSent = completedBytes + sentBytes
+          const now = Date.now()
+          const elapsedSeconds = Math.max((now - lastProgressAt) / 1000, 0.001)
+          const speed = Math.max(0, (overallSent - lastProgressBytes) / elapsedSeconds)
+          lastProgressAt = now
+          lastProgressBytes = overallSent
+          setUploadBytes({
+            sent: overallSent,
+            total: selectedFiles.reduce((sum, selected) => sum + selected.size, 0),
+            speed,
+          })
+        }
+
+        const objectPath = `${userId}/${getStoragePath(currentPath)}`
+        if (file.size === 0) {
+          const { error } = await storage.upload(objectPath, file, {
+            cacheControl: '3600',
+            upsert: false,
+            contentType: file.type || 'application/octet-stream',
+            metadata: { originalPath: currentPath },
+          })
+          if (error) {
+            throw error
+          }
+        } else {
+          await uploadSupabaseResumableFile(
+            file,
+            objectPath,
+            currentPath,
+            userId,
+            sessionData.session.access_token,
+            reportProgress,
+            abortController.signal,
+            false,
+          )
+        }
 
         uploadedCount += 1
         completedBytes += file.size
@@ -1769,30 +1710,26 @@ function App() {
       localStorage.removeItem(progressKey)
       setUploadComplete(true)
       setUploadCurrentFileProgress(0)
-      setUploadMessage(`${uploadedCount} arquivo(s) enviado(s) para o Cloudflare R2, mantendo a estrutura de pastas.`)
+      setUploadMessage(`${uploadedCount} arquivo(s) enviado(s) para o Supabase Storage, mantendo a estrutura de pastas.`)
       setUploadMessageTone('success')
-      if (legacyConflictCheckWarning) {
-        setStorageActionMessage(legacyConflictCheckWarning)
+      if (storageConflictCheckWarning) {
+        setStorageActionMessage(storageConflictCheckWarning)
       }
       setUploadSuccessOpen(true)
     } catch (error) {
       const message = getUploadErrorMessage(error)
       if (abortController.signal.aborted) {
-        setUploadMessage(`Upload pausado após ${uploadedCount} de ${selectedFiles.length} arquivo(s). Selecione novamente o mesmo arquivo e clique em Enviar para continuar as partes já recebidas pelo R2.`)
+        setUploadMessage(`Upload pausado após ${uploadedCount} de ${selectedFiles.length} arquivo(s). Selecione novamente o mesmo arquivo e clique em Enviar para retomar o envio no Supabase Storage.`)
         setUploadMessageTone('info')
         return
       }
       const normalizedMessage = message.toLowerCase()
-      const details = normalizedMessage.includes('invalid key')
-        ? 'O provedor legado rejeitou a chave do objeto.'
-        : normalizedMessage.includes('already exists') || normalizedMessage.includes('duplicate')
+      const details = normalizedMessage.includes('already exists') || normalizedMessage.includes('duplicate')
         ? `Já existe um objeto com esse nome. Nenhum arquivo existente foi substituído. Altere o nome da pasta ou do arquivo e tente novamente.`
         : normalizedMessage.includes('exceeded the maximum allowed size') || normalizedMessage.includes('maximum allowed size')
         ? `O arquivo ultrapassa o limite configurado do provedor de armazenamento.`
-        : normalizedMessage.includes('bucket not found')
-        ? `O bucket R2 configurado no servidor não existe ou não está acessível. Verifique R2_BUCKET_NAME e as credenciais da Edge Function.`
         : normalizedMessage.includes('row-level security')
-          ? `A sessão está autenticada, mas uma política RLS bloqueou o catálogo. Aplique a migration 20261117000000_add_r2_file_catalog.sql.`
+        ? 'A sessão está autenticada, mas uma política RLS bloqueou a operação. Verifique as políticas de acesso do Supabase.'
         : message
 
       setUploadMessage(`Upload interrompido após ${uploadedCount} de ${selectedFiles.length} arquivo(s). Falha em "${currentPath}": ${details}`)
@@ -1888,13 +1825,13 @@ function App() {
           </p>
           <h2>Arquivos reais da sua conta</h2>
           <p className="lead">
-            Consulte o catálogo de metadados no Supabase e os objetos privados no Cloudflare R2. Arquivos legados do Supabase Storage continuam disponíveis durante a migração gradual.
+            Consulte e gerencie seus arquivos usando exclusivamente o Supabase Storage.
           </p>
         </div>
 
         <div className="status-card">
-          <span className="status-label">Armazenamento principal</span>
-          <strong>Cloudflare R2</strong>
+          <span className="status-label">Armazenamento</span>
+          <strong>Supabase Storage</strong>
           <span className="status-meta">{sessionEmail || 'Entre para consultar seus arquivos'}</span>
         </div>
       </section>
@@ -2015,7 +1952,7 @@ function App() {
               ? 'Configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para habilitar autenticação e metadados.'
               : !sessionUserId
                 ? 'Entre com sua conta para consultar os objetos permitidos pelas políticas do Storage.'
-                : 'Os metadados vêm do Supabase e os arquivos novos são privados no Cloudflare R2.')}
+                : 'Os metadados e arquivos são consultados no Supabase Storage.')}
           </p>
           {storageActionMessage && <p className="status-message">{storageActionMessage}</p>}
         </article>
@@ -2047,7 +1984,7 @@ function App() {
         <div className="mini-card">
           <span className="eyebrow">Arquivos na nuvem</span>
           <h4>{sessionUserId && !storageLoading && !storageError ? `${storageSnapshot.files.length.toLocaleString('pt-BR')} arquivos` : '—'}</h4>
-          <p>{sessionUserId && !storageLoading && !storageError ? `${formatFileSize(totalStorageBytes)} armazenados em R2 e no legado` : storageError || 'Aguardando uma sessão válida.'}</p>
+          <p>{sessionUserId && !storageLoading && !storageError ? `${formatFileSize(totalStorageBytes)} armazenados no Supabase Storage` : storageError || 'Aguardando uma sessão válida.'}</p>
         </div>
         <div className="mini-card">
           <span className="eyebrow">Envio desta sessão</span>
@@ -2116,7 +2053,7 @@ function App() {
         </Button>
       </div>
 
-      <p className="muted">Arquivos visíveis para {sessionEmail || 'a conta autenticada'}; novos objetos usam Cloudflare R2.</p>
+      <p className="muted">Arquivos visíveis para {sessionEmail || 'a conta autenticada'}; o destino dos novos uploads pode ser escolhido na área de envio.</p>
       {storageError && <p className="status-message">{storageError}</p>}
       {storageActionMessage && <p className="status-message">{storageActionMessage}</p>}
       {cacheMessage && <p className="status-message">{cacheMessage}</p>}
@@ -2239,7 +2176,7 @@ function App() {
                                   <Download size={14} aria-hidden="true" />
                                   {downloadingPath === file.objectPath
                                     ? 'Preparando...'
-                                    : file.provider === 'supabase' && cachedFilePaths.has(file.objectPath)
+                                    : cachedFilePaths.has(file.objectPath)
                                       ? 'Baixar (local)'
                                       : 'Baixar'}
                                 </Button>
@@ -2337,7 +2274,7 @@ function App() {
           <tbody>
             <tr><td>Usuário autenticado</td><td>{sessionEmail || 'Nenhum'}</td></tr>
             <tr><td>Nível de acesso</td><td>{isMaster ? 'Master' : accessRole === 'manager' ? 'Gerente' : accessRole === 'collaborator' ? 'Colaborador' : 'Verificando…'}</td></tr>
-            <tr><td>Bucket legado (Supabase Storage)</td><td>{storageBucket}</td></tr>
+            <tr><td>Bucket (Supabase Storage)</td><td>{storageBucket}</td></tr>
             <tr><td>Objetos acessíveis nesta sessão</td><td>{storageError ? 'Falha ao consultar' : storageLoading ? 'Consultando...' : storageSnapshot.files.length.toLocaleString('pt-BR')}</td></tr>
             <tr><td>Escopo</td><td>{canAccessAllFiles ? 'Todos os arquivos e pastas do bucket' : 'Somente os arquivos e pastas desta conta'}</td></tr>
           </tbody>
@@ -2345,7 +2282,7 @@ function App() {
       </div>
       {accessError && <p className="status-message" role="alert">Não foi possível carregar o perfil: {accessError}</p>}
       <p className="muted mt">
-        O Supabase aplica RLS nos metadados; a Edge Function valida propriedade e papéis antes de emitir URLs ou executar operações no R2. Políticas existentes continuam protegendo objetos legados do Supabase Storage.
+        O Supabase aplica políticas RLS e valida a propriedade dos objetos nas operações de armazenamento.
       </p>
 
       {isMaster && (
@@ -2432,7 +2369,7 @@ function App() {
   const renderSettings = () => (
     <section className="panel">
       <div className="panel-header">
-        <h3>Configuração da integração</h3>
+        <h3>Configuração do armazenamento</h3>
         <Button type="button" variant="outline" size="sm" onClick={refreshStorage} disabled={!sessionUserId || syncing}>
           <RefreshCw size={14} aria-hidden="true" className={syncing ? 'spin' : ''} />
           {syncing ? 'Sincronizando...' : 'Verificar conexão'}
@@ -2441,7 +2378,7 @@ function App() {
 
       <div className="settings-list">
         <div className="setting-row"><span>Configuração do Supabase</span><strong>{supabase ? 'Configurado' : 'Não configurado'}</strong></div>
-        <div className="setting-row"><span>Bucket legado (Supabase Storage)</span><strong>{storageBucket}</strong></div>
+        <div className="setting-row"><span>Bucket do Supabase Storage</span><strong>{storageBucket}</strong></div>
         <div className="setting-row"><span>Conta da sessão</span><strong>{sessionEmail || 'Não conectada'}</strong></div>
         <div className="setting-row"><span>Transferência disponível</span><strong>Upload, edição e download manuais</strong></div>
         <div className="setting-row"><span>Arquivos em cache local</span><strong>{cachedFilePaths.size} neste navegador</strong></div>
@@ -2548,7 +2485,9 @@ function App() {
             <div>
               <h3><Cloud size={17} aria-hidden="true" /> Transferência de arquivos</h3>
               <p className="muted">
-                {supabase ? 'Novos arquivos são enviados diretamente ao Cloudflare R2 em partes; o Supabase mantém autenticação e metadados.' : 'Configure as chaves do projeto para ativar o armazenamento.'}
+                {supabase
+                  ? 'Novos arquivos serão enviados ao Supabase Storage.'
+                  : 'Configure as chaves do projeto para ativar o armazenamento.'}
               </p>
             </div>
             {sessionEmail ? (
@@ -2595,7 +2534,10 @@ function App() {
                     />
                   </label>
                 </div>
-                <p className="upload-help">Partes de 100 MiB, concorrência de 3 partes e retomada após selecionar novamente o mesmo arquivo. Pastas mantêm a estrutura de subpastas.</p>
+                <p className="upload-help">
+                  Supabase Storage: upload retomável; se interrompido, selecione novamente o mesmo arquivo para continuar.
+                  {' '}Pastas mantêm a estrutura de subpastas.
+                </p>
               </div>
 
               {selectedFiles.length > 0 && (
@@ -2645,8 +2587,7 @@ function App() {
               )}
 
               <div className="upload-meta">
-                <span><HardDrive size={14} aria-hidden="true" /> Destino dos novos arquivos</span>
-                <strong>Cloudflare R2</strong>
+                <span><HardDrive size={14} aria-hidden="true" /> Supabase Storage</span>
               </div>
 
               <div className="toolbar">
