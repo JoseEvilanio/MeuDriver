@@ -1823,16 +1823,23 @@ function App() {
           <p className={`eyebrow ${sessionUserId && !storageError ? 'success' : ''}`}>
             {storageError ? 'Erro ao acessar os metadados' : storageLoading ? 'Atualizando dados da nuvem' : sessionUserId ? 'Conta conectada à nuvem' : 'Login necessário'}
           </p>
-          <h2>Arquivos reais da sua conta</h2>
+          <h2>Seu drive, sob controle.</h2>
           <p className="lead">
-            Consulte e gerencie seus arquivos usando exclusivamente o Supabase Storage.
+            Consulte, organize e transfira arquivos sem perder o contexto da nuvem.
           </p>
         </div>
 
         <div className="status-card">
-          <span className="status-label">Armazenamento</span>
-          <strong>Supabase Storage</strong>
-          <span className="status-meta">{sessionEmail || 'Entre para consultar seus arquivos'}</span>
+          <div className="drive-orbit" aria-hidden="true">
+            <span className="drive-core"><Cloud size={24} /></span>
+            <span className="orbit-dot orbit-dot-one" />
+            <span className="orbit-dot orbit-dot-two" />
+          </div>
+          <div>
+            <span className="status-label">Armazenamento</span>
+            <strong>Supabase</strong>
+            <span className="status-meta">{sessionEmail || 'Entre para consultar seus arquivos'}</span>
+          </div>
         </div>
       </section>
 
